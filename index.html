@@ -1481,14 +1481,25 @@ let pendingLocalPush = false;
 
     // Caja de Pago Móvil
     y += 55;
-    const boxH = 175 + 30 + 28;
+    const boxH = 175 + 30 + 28 + 46;
     ctx.fillStyle = '#F0F0F0';
     ctx.beginPath();
     ctx.roundRect ? ctx.roundRect(60, y, W - 120, boxH, 16) : ctx.rect(60, y, W - 120, boxH);
     ctx.fill();
 
-    let py = y + 34;
+    let py = y + 38;
     ctx.textAlign = 'left';
+    ctx.fillStyle = '#8A6508';
+    ctx.font = '800 24px Sora, sans-serif';
+    ctx.fillText('Métodos de pago', 84, py);
+    ctx.strokeStyle = '#E9C42B';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(84, py + 12);
+    ctx.lineTo(W - 84, py + 12);
+    ctx.stroke();
+
+    py += 48;
     ctx.fillStyle = '#111111';
     ctx.font = '700 20px Sora, sans-serif';
     ctx.fillText('📱 Pago Móvil', 84, py);
@@ -1502,7 +1513,7 @@ let pendingLocalPush = false;
     py += 28;
     ctx.fillText(`Teléfono: ${PAGO_MOVIL.telefono}`, 84, py);
     py += 28;
-    ctx.fillText(`Binance ID: ${BINANCE.id}`, 84, py);
+    ctx.fillText(`💠 Binance ID: ${BINANCE.id}`, 84, py);
     if (bcv){
       py += 32;
       ctx.font = '700 20px Inter, sans-serif';
@@ -1542,6 +1553,7 @@ let pendingLocalPush = false;
     }
     if (payment.advance > 0) msg += `Anticipo pagado: ${fmtMoney(payment.advance)}\n`;
     if (payment.remaining > 0) msg += `Saldo restante: ${fmtMoney(payment.remaining)}\n`;
+    msg += `\n💳 *MÉTODOS DE PAGO*\n`;
     msg += `\n📱 *Pago Móvil*\n`;
     msg += `Banco: ${PAGO_MOVIL.banco}\n`;
     msg += `C.I.: ${PAGO_MOVIL.ci}\n`;
