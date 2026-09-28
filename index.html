@@ -702,7 +702,7 @@ import {
   getFirestore, doc, setDoc, onSnapshot
 } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-firestore.js";
 import {
-  getAuth, signInAnonymously, GoogleAuthProvider, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut,
+  getAuth, signInAnonymously, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut,
   setPersistence, browserLocalPersistence
 } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-auth.js";
 
@@ -912,6 +912,12 @@ let pendingLocalPush = false;
     if (code === 'auth/operation-not-allowed'){
       return 'El inicio de sesión con Google no está activado en Firebase (Authentication → Método de acceso → Google).';
     }
+    if (code === 'auth/popup-blocked'){
+      return 'El navegador bloqueó la ventana de Google. Permite las ventanas emergentes para este sitio e inténtalo de nuevo.';
+    }
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request'){
+      return 'Se cerró la ventana de Google antes de terminar. Inténtalo de nuevo.';
+    }
     if (code === 'auth/network-request-failed'){
       return 'Falló la conexión a internet. Intenta de nuevo.';
     }
@@ -975,13 +981,44 @@ let pendingLocalPush = false;
       }, 3500);
     }
 
+    // Google bloquea el ingreso dentro de navegadores internos (WhatsApp, Instagram, Facebook...)
+    const inApp = /FBAN|FBAV|FB_IAB|Instagram|Line\/|MicroMessenger|Messenger|Snapchat|TikTok|WhatsApp|; wv\)/i.test(navigator.userAgent || '');
+    if (inApp){
+      statusEl.textContent = 'Estás dentro de otra app (WhatsApp, Instagram, Facebook...). Google no permite iniciar sesión ahí. Toca los tres puntos ⋮ y elige "Abrir en Chrome".';
+    }
+
+    // iPhone instalado ("Añadir a pantalla de inicio"): Google bloquea el
+    // inicio de sesión ahí. Hay que iniciar sesión primero desde Safari normal.
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent || '');
+    const isStandalone = window.navigator.standalone === true;
+    if (isIOS && isStandalone && !inApp){
+      statusEl.textContent = 'Google no permite iniciar sesión desde la app ya instalada en iPhone. Abre este enlace en Safari (no en el ícono instalado), inicia sesión ahí una vez, y luego podrás usar la app instalada normalmente.';
+    }
+
     btn.addEventListener('click', async () => {
-      statusEl.textContent = '';
+      if (!inApp) statusEl.textContent = '';
       btn.disabled = true;
       try{
         await setPersistence(auth, browserLocalPersistence);
         const provider = new GoogleAuthProvider();
-        await signInWithRedirect(auth, provider);
+        provider.setCustomParameters({ prompt: 'select_account' });
+        try{
+          const result = await signInWithPopup(auth, provider);
+          const email = ((result.user && result.user.email) || '').toLowerCase();
+          if (AUTHORIZED_EMAILS.includes(email)){
+            enter();
+          } else {
+            statusEl.textContent = 'Ese correo no tiene acceso a Blossom Shop.';
+            await signOut(auth).catch(() => {});
+            btn.disabled = false;
+          }
+        }catch(e){
+          if (e && (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment')){
+            await signInWithRedirect(auth, provider);   // respaldo
+            return;
+          }
+          throw e;
+        }
       }catch(e){
         console.error('Error de inicio de sesión', e);
         statusEl.textContent = loginErrorMessage(e);
