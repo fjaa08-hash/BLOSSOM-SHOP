@@ -1169,7 +1169,7 @@ let pendingLocalPush = false;
   const BINANCE = {
     id: '1264259398',
   };
-  const PAYMENT_NOTE = 'Cobramos $ Divisas, Zelle y USDT (pregunte disponibilidad)';
+  const PAYMENT_NOTE = '💵 $ Divisas · USDT (pregunte disponibilidad)';
 
   // ------------------------------------------------------------
   // TASA BCV (Bs. por 1 €) — se consulta al generar cada factura,
@@ -1278,7 +1278,7 @@ let pendingLocalPush = false;
       }
     }));
     const imageExtra = items.reduce((s, item, idx) => s + (itemImages[idx] ? 24 : 0), 0);
-    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + (329 + (bcv ? 34 : 0)) + 30 + 40 + imageExtra;
+    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + (371 + (bcv ? 34 : 0)) + 30 + 40 + imageExtra;
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
 
@@ -1481,8 +1481,8 @@ let pendingLocalPush = false;
 
     // Caja de métodos de pago
     y += 55;
-    const noteBase = 286 + (bcv ? 34 : 0) + 30;
-    const boxH = noteBase + 28;
+    const payBase = 286 + (bcv ? 34 : 0);
+    const boxH = payBase + 174;
     ctx.fillStyle = '#F0F0F0';
     ctx.beginPath();
     ctx.roundRect ? ctx.roundRect(60, y, W - 120, boxH, 16) : ctx.rect(60, y, W - 120, boxH);
@@ -1544,10 +1544,44 @@ let pendingLocalPush = false;
       ctx.fillStyle = '#B8860B';
       ctx.fillText(`Monto a pagar: ${fmtBs(payment.total * bcv.rate)}`, 84, py);
     }
-    py += 30;
-    ctx.font = '500 17px Inter, sans-serif';
+
+    // Separación respecto a Binance
+    py += 28;
+    ctx.strokeStyle = '#D6D6D6';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(84, py);
+    ctx.lineTo(W - 84, py);
+    ctx.stroke();
+
+    // Símbolos: divisas y USDT (colores originales)
+    const iy = py + 24 + 23;          // centro vertical de los íconos
+    const cxs = [84 + 23, 84 + 23 + 120];
+    // $ divisas
+    ctx.fillStyle = '#2E9E5B';
+    ctx.beginPath(); ctx.arc(cxs[0], iy, 23, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '800 30px Sora, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('$', cxs[0], iy + 11);
+    // USDT (Tether)
+    ctx.fillStyle = '#26A17B';
+    ctx.beginPath(); ctx.arc(cxs[1], iy, 23, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(cxs[1] - 11, iy - 12, 22, 5.5);
+    ctx.fillRect(cxs[1] - 2.75, iy - 12, 5.5, 26);
+    ctx.strokeStyle = '#FFFFFF';
+    ctx.lineWidth = 2.6;
+    ctx.beginPath(); ctx.ellipse(cxs[1], iy - 1, 12, 4.6, 0, 0, Math.PI * 2); ctx.stroke();
+    // etiquetas
+    ctx.fillStyle = '#111111';
+    ctx.font = '600 16px Inter, sans-serif';
+    ctx.fillText('Divisas', cxs[0], iy + 23 + 22);
+    ctx.fillText('USDT', cxs[1], iy + 23 + 22);
+    ctx.textAlign = 'left';
+    ctx.font = '500 16px Inter, sans-serif';
     ctx.fillStyle = '#6B6B6B';
-    wrapCanvasText(ctx, PAYMENT_NOTE, 84, py, W - 168, 21, 'left');
+    ctx.fillText('Pregunte disponibilidad', 84, iy + 23 + 22 + 30);
     y += boxH;
 
     // Footer
