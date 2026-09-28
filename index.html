@@ -1278,7 +1278,7 @@ let pendingLocalPush = false;
       }
     }));
     const imageExtra = items.reduce((s, item, idx) => s + (itemImages[idx] ? 24 : 0), 0);
-    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + 190 + 30 + 40 + imageExtra;
+    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + (329 + (bcv ? 34 : 0)) + 30 + 40 + imageExtra;
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
 
@@ -1479,9 +1479,10 @@ let pendingLocalPush = false;
       ctx.fillText(`Tasa BCV: ${bcv.rate.toLocaleString('es-VE',{minimumFractionDigits:2})} Bs/€ (${fecha})`, 60, y);
     }
 
-    // Caja de Pago Móvil
+    // Caja de métodos de pago
     y += 55;
-    const boxH = 175 + 30 + 28 + 46;
+    const noteBase = 286 + (bcv ? 34 : 0) + 30;
+    const boxH = noteBase + 28;
     ctx.fillStyle = '#F0F0F0';
     ctx.beginPath();
     ctx.roundRect ? ctx.roundRect(60, y, W - 120, boxH, 16) : ctx.rect(60, y, W - 120, boxH);
@@ -1490,7 +1491,7 @@ let pendingLocalPush = false;
     let py = y + 38;
     ctx.textAlign = 'left';
     ctx.fillStyle = '#8A6508';
-    ctx.font = '800 24px Sora, sans-serif';
+    ctx.font = '800 26px Sora, sans-serif';
     ctx.fillText('Métodos de pago', 84, py);
     ctx.strokeStyle = '#E9C42B';
     ctx.lineWidth = 2;
@@ -1499,31 +1500,54 @@ let pendingLocalPush = false;
     ctx.lineTo(W - 84, py + 12);
     ctx.stroke();
 
+    // Pago Móvil
     py += 48;
     ctx.fillStyle = '#111111';
-    ctx.font = '700 20px Sora, sans-serif';
+    ctx.font = '700 23px Sora, sans-serif';
     ctx.fillText('📱 Pago Móvil', 84, py);
-
-    py += 34;
-    ctx.font = '600 18px Inter, sans-serif';
-    ctx.fillStyle = '#111111';
+    py += 36;
+    ctx.font = '600 21px Inter, sans-serif';
     ctx.fillText(`Banco: ${PAGO_MOVIL.banco}`, 84, py);
-    py += 28;
+    py += 32;
     ctx.fillText(`C.I.: ${PAGO_MOVIL.ci}`, 84, py);
-    py += 28;
+    py += 32;
     ctx.fillText(`Teléfono: ${PAGO_MOVIL.telefono}`, 84, py);
-    py += 28;
-    ctx.fillText(`💠 Binance ID: ${BINANCE.id}`, 84, py);
+
+    // Separación
+    py += 22;
+    ctx.strokeStyle = '#D6D6D6';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(84, py);
+    ctx.lineTo(W - 84, py);
+    ctx.stroke();
+
+    // Binance con logo
+    py += 40;
+    ctx.save();
+    ctx.translate(84, py - 27);
+    ctx.scale(34 / 126.61, 34 / 126.61);
+    ctx.fillStyle = '#F3BA2F';
+    ctx.fill(new Path2D('M38.73 53.2l24.59-24.58 24.6 24.6 14.3-14.31L63.32 0 24.42 38.9l14.31 14.3zM0 63.31l14.3-14.31 14.31 14.31-14.31 14.3zM38.73 73.41l24.59 24.59 24.6-24.6 14.31 14.29-.01.01-38.9 38.91-38.91-38.88-.02-.02 14.34-14.3zM97.99 63.31l14.3-14.31 14.32 14.3-14.31 14.32z'));
+    ctx.fill(new Path2D('M77.83 63.3h.02L63.32 48.78 52.59 59.5h-.01l-1.23 1.23-2.54 2.54-.02.02.02.02 14.51 14.5 14.53-14.52.01-.01-.02-.02z'));
+    ctx.restore();
+    ctx.fillStyle = '#111111';
+    ctx.font = '700 23px Sora, sans-serif';
+    ctx.fillText('Binance', 84 + 34 + 12, py);
+    py += 38;
+    ctx.font = '600 21px Inter, sans-serif';
+    ctx.fillText(`ID: ${BINANCE.id}`, 84, py);
+
     if (bcv){
-      py += 32;
-      ctx.font = '700 20px Inter, sans-serif';
+      py += 34;
+      ctx.font = '700 22px Inter, sans-serif';
       ctx.fillStyle = '#B8860B';
       ctx.fillText(`Monto a pagar: ${fmtBs(payment.total * bcv.rate)}`, 84, py);
     }
     py += 30;
-    ctx.font = '500 16px Inter, sans-serif';
+    ctx.font = '500 17px Inter, sans-serif';
     ctx.fillStyle = '#6B6B6B';
-    wrapCanvasText(ctx, PAYMENT_NOTE, 84, py, W - 168, 20, 'left');
+    wrapCanvasText(ctx, PAYMENT_NOTE, 84, py, W - 168, 21, 'left');
     y += boxH;
 
     // Footer
