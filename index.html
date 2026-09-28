@@ -558,7 +558,7 @@
       <b id="remainingPreview">€0</b>
     </div>
     <div class="field">
-      <label>Fecha y hora del servicio o cita</label>
+      <label>Fecha de la venta</label>
       <input id="payServiceDate" type="datetime-local">
     </div>
     <div class="field">
@@ -1367,7 +1367,7 @@ let pendingLocalPush = false;
     const isAppointment = payment.remaining > 0;
     ctx.fillStyle = '#6B6B6B';
     ctx.font = '600 20px Inter, sans-serif';
-    ctx.fillText(isAppointment ? '📅 Cita agendada' : 'Fecha y hora del servicio', 60, y);
+    ctx.fillText('Fecha de la venta', 60, y);
     ctx.fillStyle = isAppointment ? '#B8860B' : '#111111';
     ctx.font = isAppointment ? '700 26px Sora, sans-serif' : '600 24px Inter, sans-serif';
     ctx.textAlign = 'right';
@@ -1530,9 +1530,7 @@ let pendingLocalPush = false;
     const isAppointment = payment.remaining > 0;
     let msg = `*${SALON_NAME}*\n` + (SALON_ADDRESS ? `_${SALON_ADDRESS}_\n` : '') + `\n`;
     msg += `🧾 *Factura*\n`;
-    msg += isAppointment
-      ? `📅 *Cita agendada:* ${formatDateTime(payment.serviceDate)}\n`
-      : `Fecha y hora del servicio: ${formatDateTime(payment.serviceDate)}\n`;
+    msg += `Fecha de la venta: ${formatDateTime(payment.serviceDate)}\n`;
     msg += `Cliente: ${client.name}\n`;
     msg += `Factura emitida el: ${formatDateTime(new Date().toISOString())}\n\n`;
     items.forEach(item => {
