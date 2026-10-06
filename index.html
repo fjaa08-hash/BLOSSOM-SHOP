@@ -759,6 +759,7 @@ function getFirebaseAuthInstance(){
 let cloudReady = false;
 let applyingRemoteUpdate = false;
 let pendingLocalPush = false;
+let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio recién hecho aquí
 
 (function(){
   // Si la app se abre fuera del entorno de Claude (por ejemplo, publicada en
@@ -857,9 +858,11 @@ let pendingLocalPush = false;
     }
     try{
       const ref = doc(cloudDb, ...SALON_DOC);
+      const ts = Date.now();
+      lastPushAt = ts;
       await setDoc(ref, {
         clients, payments, services, products,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date(ts).toISOString()
       });
     }catch(e){
       console.error('No se pudo sincronizar con la nube', e);
@@ -887,6 +890,14 @@ let pendingLocalPush = false;
           return;
         }
         const data = snap.data();
+        // Si este dato que llega de la nube es más viejo (o igual) que lo último
+        // que acabamos de guardar nosotros mismos, es un eco atrasado: lo ignoramos
+        // para no borrar de la pantalla un cambio que ya hicimos.
+        const remoteTs = data.updatedAt ? new Date(data.updatedAt).getTime() : 0;
+        if (lastPushAt && remoteTs && remoteTs < lastPushAt){
+          if (pendingLocalPush){ pendingLocalPush = false; pushToCloud(); }
+          return;
+        }
         applyingRemoteUpdate = true;
         clients = data.clients || [];
         payments = data.payments || [];
