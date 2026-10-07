@@ -649,6 +649,12 @@
       <label class="file-btn" for="restoreFileInput">Restaurar desde un archivo de respaldo</label>
       <input type="file" id="restoreFileInput" accept="application/json" style="display:none;">
     </div>
+
+    <div class="settings-block" id="logoutBlock" style="display:none;">
+      <h3>Cuenta</h3>
+      <p>Cierra la sesión en este celular. Para volver a entrar necesitarás el correo y la contraseña.</p>
+      <button class="btn-main secondary" id="logoutBtn" style="color:#C6425E; border-color:#F3C9D2;">🚪 Cerrar sesión</button>
+    </div>
   </div>
 
   <button class="fab" id="fabAdd" title="Nuevo cliente">
@@ -851,7 +857,11 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     }
   }
 
-  async function pushToCloud(){
+  async function pushToCloud(field){
+    // field: 'clients' | 'payments' | 'services' | 'products' | undefined (todo, solo para la primera subida)
+    // IMPORTANTE: solo se sube (con merge) la parte que cambió, nunca el documento
+    // completo. Así, si otra sesión guarda algo de otra sección con datos
+    // desactualizados, no borra lo que ya estaba guardado en la nube.
     if (!SYNC_ENABLED || !cloudReady || applyingRemoteUpdate){
       pendingLocalPush = !cloudReady && SYNC_ENABLED;
       return;
@@ -860,10 +870,11 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
       const ref = doc(cloudDb, ...SALON_DOC);
       const ts = Date.now();
       lastPushAt = ts;
-      await setDoc(ref, {
-        clients, payments, services, products,
-        updatedAt: new Date(ts).toISOString()
-      });
+      const payload = field
+        ? { [field]: field === 'clients' ? clients : field === 'payments' ? payments : field === 'services' ? services : products,
+            updatedAt: new Date(ts).toISOString() }
+        : { clients, payments, services, products, updatedAt: new Date(ts).toISOString() };
+      await setDoc(ref, payload, { merge: true });
     }catch(e){
       console.error('No se pudo sincronizar con la nube', e);
       updateSyncBadge('error');
@@ -1740,22 +1751,22 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
   async function saveClients(){
     try{ await window.storage.set('clients', JSON.stringify(clients), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud();
+    pushToCloud('clients');
   }
   async function savePayments(){
     try{ await window.storage.set('payments', JSON.stringify(payments), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud();
+    pushToCloud('payments');
   }
   async function saveServices(){
     try{ await window.storage.set('services', JSON.stringify(services), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud();
+    pushToCloud('services');
   }
   async function saveProducts(){
     try{ await window.storage.set('products', JSON.stringify(products), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud();
+    pushToCloud('products');
   }
 
   function clientVisits(clientId){
@@ -2344,6 +2355,17 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     ensureAtLeastOneRow();
     loadData();
     initCloudSync();
+    if (LOGIN_ENABLED){
+      $('logoutBlock').style.display = '';
+      $('logoutBtn').addEventListener('click', async () => {
+        if (!confirm('¿Cerrar sesión en este celular?')) return;
+        try{
+          const auth = getFirebaseAuthInstance();
+          if (auth) await signOut(auth);
+        }catch(e){ console.error('No se pudo cerrar sesión', e); }
+        location.reload();
+      });
+    }
   }
 
   if (LOGIN_ENABLED){
