@@ -242,6 +242,8 @@
   .empty b{display:block; color:var(--plum-ink); font-size:15px; margin-bottom:6px; font-family:'Sora',sans-serif;}
 
   /* FAB */
+  #productList::-webkit-scrollbar{ display:none; }
+
   .fab{
     position:fixed;
     left:50%;
@@ -596,7 +598,13 @@
     <div class="settings-block">
       <h3>Inventario de productos</h3>
       <p>Agrega los productos que vendes en tienda, con su precio y cuántas unidades tienes. Al vender uno en "Pago", el inventario baja solo.</p>
-      <div id="productList"></div>
+      <div style="position:relative;">
+        <div id="productList" style="max-height:440px; overflow-y:auto; -webkit-overflow-scrolling:touch; padding-right:24px; scrollbar-width:none;"></div>
+        <div id="productScrollTrack" style="position:absolute; top:0; right:0; bottom:0; width:16px; display:none;">
+          <div style="position:absolute; top:0; bottom:0; left:6px; width:4px; border-radius:3px; background:#F0E3A8;"></div>
+          <div id="productScrollThumb" style="position:absolute; left:2px; width:12px; border-radius:6px; background:linear-gradient(180deg,#F3D96B,#B8860B); box-shadow:0 1px 3px rgba(0,0,0,.25); cursor:grab; touch-action:none;"></div>
+        </div>
+      </div>
       <div class="row2" style="margin-top:10px;">
         <div class="field" style="margin-bottom:0;">
           <input id="newProductName" placeholder="Nombre del producto">
@@ -1884,7 +1892,77 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     const stockValue = products.reduce((s,p)=> s + (p.price * p.stock), 0);
     $('storeStockValue').textContent = fmtMoney(stockValue).replace('.00','');
     $('storeLowStock').textContent = products.filter(p => p.stock <= 3).length;
+    updateProductScrollbar();
   }
+
+  // Barra deslizadora del inventario (Tienda): sube y baja la lista de productos
+  function updateProductScrollbar(){
+    const list = $('productList');
+    const track = $('productScrollTrack');
+    const thumb = $('productScrollThumb');
+    if (!list || !track || !thumb) return;
+    const trackH = track.clientHeight;
+    const canScroll = list.scrollHeight > list.clientHeight + 2;
+    track.style.display = canScroll ? 'block' : 'none';
+    if (!canScroll) return;
+    const thumbH = Math.max(28, (list.clientHeight / list.scrollHeight) * trackH);
+    const maxThumbTop = trackH - thumbH;
+    const maxScroll = list.scrollHeight - list.clientHeight;
+    const ratio = maxScroll > 0 ? (list.scrollTop / maxScroll) : 0;
+    thumb.style.height = thumbH + 'px';
+    thumb.style.top = (ratio * maxThumbTop) + 'px';
+  }
+
+  (function setupProductScrollbar(){
+    const list = $('productList');
+    const track = $('productScrollTrack');
+    const thumb = $('productScrollThumb');
+    if (!list || !track || !thumb) return;
+
+    list.addEventListener('scroll', updateProductScrollbar);
+    window.addEventListener('resize', updateProductScrollbar);
+
+    let dragging = false, startY = 0, startScrollTop = 0;
+
+    function onMove(clientY){
+      const trackH = track.clientHeight;
+      const thumbH = thumb.clientHeight;
+      const maxThumbTop = Math.max(1, trackH - thumbH);
+      const maxScroll = list.scrollHeight - list.clientHeight;
+      const deltaY = clientY - startY;
+      const deltaRatio = deltaY / maxThumbTop;
+      list.scrollTop = startScrollTop + deltaRatio * maxScroll;
+    }
+
+    thumb.addEventListener('mousedown', (e) => {
+      dragging = true; startY = e.clientY; startScrollTop = list.scrollTop;
+      thumb.style.cursor = 'grabbing';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => { if (dragging) onMove(e.clientY); });
+    window.addEventListener('mouseup', () => { dragging = false; thumb.style.cursor = 'grab'; });
+
+    thumb.addEventListener('touchstart', (e) => {
+      dragging = true; startY = e.touches[0].clientY; startScrollTop = list.scrollTop;
+    }, { passive: true });
+    window.addEventListener('touchmove', (e) => {
+      if (dragging){ onMove(e.touches[0].clientY); e.preventDefault(); }
+    }, { passive: false });
+    window.addEventListener('touchend', () => { dragging = false; });
+
+    // Tocar el riel (fuera del dedal) salta directo a ese punto
+    track.addEventListener('mousedown', (e) => {
+      if (e.target === thumb) return;
+      const rect = track.getBoundingClientRect();
+      const trackH = track.clientHeight;
+      const thumbH = thumb.clientHeight;
+      const y = e.clientY - rect.top - thumbH / 2;
+      const maxThumbTop = Math.max(1, trackH - thumbH);
+      const ratio = Math.min(1, Math.max(0, y / maxThumbTop));
+      const maxScroll = list.scrollHeight - list.clientHeight;
+      list.scrollTop = ratio * maxScroll;
+    });
+  })();
 
   function renderLedger(){
     const list = $('ledgerList');
@@ -2351,9 +2429,13 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     });
   }
 
-  function startApp(){
+  async function startApp(){
     ensureAtLeastOneRow();
-    loadData();
+    // Importante: hay que esperar a que termine de cargar lo guardado en este
+    // celular ANTES de conectar con la nube. Si las dos corrieran al mismo
+    // tiempo, la que termine última pisaría a la otra y se podrían perder
+    // datos ya guardados, sin que haga falta un segundo dispositivo.
+    await loadData();
     initCloudSync();
     if (LOGIN_ENABLED){
       $('logoutBlock').style.display = '';
