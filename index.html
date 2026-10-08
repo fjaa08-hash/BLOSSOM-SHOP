@@ -511,6 +511,12 @@
     </div>
   </div>
 
+  <div id="backupReminder" style="display:none; margin:8px 14px 0; padding:10px 12px; border-radius:12px; background:#FFF4C9; border:1px solid #E9C42B; font-size:12.5px; color:#4A3500; align-items:center; gap:8px;">
+    <span id="backupReminderText" style="flex:1; line-height:1.35;">Hace más de un día que no guardas una copia en tu Drive.</span>
+    <button id="backupReminderBtn" type="button" style="border:none; background:linear-gradient(120deg,#8A6508,#D4AB15); color:#fff; font-weight:700; font-size:12px; padding:7px 12px; border-radius:10px; cursor:pointer;">Respaldar</button>
+    <button id="backupReminderClose" type="button" style="border:none; background:transparent; color:#8A6508; font-size:16px; cursor:pointer;" aria-label="Cerrar">✕</button>
+  </div>
+
   <div class="tabs">
     <div class="tab active" data-tab="clientes">Clientes</div>
     <div class="tab" data-tab="pago">Pago</div>
@@ -652,8 +658,10 @@
 
     <div class="settings-block">
       <h3>Copia de seguridad</h3>
-      <p>Descarga un archivo con todas tus clientes, servicios, productos y pagos. Guárdalo en un lugar seguro (Drive, correo) por si cambias de celular.</p>
-      <button class="btn-main" id="downloadBackupBtn">Descargar copia de seguridad</button>
+      <p>La app respalda sola tus datos en la nube cada vez que cambias algo. Además, una vez al día guarda una copia en tu Google Drive: toca el botón, elige "Drive" en el menú y confirma. Si cambias de celular, entrando con tu correo y contraseña se recuperan los datos.</p>
+      <button class="btn-main" id="shareBackupBtn">📤 Enviar copia a Drive / WhatsApp</button>
+      <button class="btn-main secondary" id="downloadBackupBtn">Descargar copia de seguridad</button>
+      <button class="btn-main secondary" id="restoreCloudBtn" style="display:none;">☁️ Restaurar desde la nube</button>
       <label class="file-btn" for="restoreFileInput">Restaurar desde un archivo de respaldo</label>
       <input type="file" id="restoreFileInput" accept="application/json" style="display:none;">
     </div>
@@ -714,7 +722,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js";
 import {
-  getFirestore, doc, setDoc, onSnapshot
+  getFirestore, doc, collection, writeBatch, getDocs, getDoc
 } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-firestore.js";
 import {
   getAuth, signInAnonymously, signInWithEmailAndPassword, onAuthStateChanged, signOut,
@@ -770,10 +778,6 @@ function getFirebaseAuthInstance(){
   }
   return firebaseAuthInstance;
 }
-let cloudReady = false;
-let applyingRemoteUpdate = false;
-let pendingLocalPush = false;
-let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio recién hecho aquí
 
 (function(){
   // Si la app se abre fuera del entorno de Claude (por ejemplo, publicada en
@@ -781,22 +785,76 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
   // como respaldo automático, con la misma forma de respuesta para no tocar
   // el resto del código.
   if (!window.storage){
+    // Almacenamiento local en IndexedDB (mucho más espacio que localStorage, que
+    // se llena con ~5 MB y es fácil que se llene con fotos). Lo que ya estaba
+    // guardado en localStorage se sigue leyendo y se pasa a IndexedDB al guardar.
+    const IDB_NAME = 'blossom_shop_db', IDB_STORE = 'kv';
+    let idbPromise = null;
+    function openIdb(){
+      if (idbPromise) return idbPromise;
+      idbPromise = new Promise((resolve, reject) => {
+        if (!('indexedDB' in window)){ reject(new Error('sin-indexeddb')); return; }
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error || new Error('idb-error'));
+        req.onblocked = () => reject(new Error('idb-bloqueado'));
+      });
+      idbPromise.catch(() => { idbPromise = null; });
+      return idbPromise;
+    }
+    function idbGet(key){
+      return openIdb().then(db => new Promise((resolve, reject) => {
+        const r = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+        r.onsuccess = () => resolve(r.result);
+        r.onerror = () => reject(r.error);
+      }));
+    }
+    function idbSet(key, value){
+      return openIdb().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(value, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error || new Error('idb-escritura'));
+        tx.onabort = () => reject(tx.error || new Error('idb-cancelado'));
+      }));
+    }
+    function idbDelete(key){
+      return openIdb().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      }));
+    }
     window.storage = {
       async get(key){
         try{
-          const v = localStorage.getItem(key);
-          return v === null ? null : { key, value: v };
-        }catch(e){ return null; }
+          const v = await idbGet(key);
+          if (v !== undefined && v !== null) return { key, value: v };
+        }catch(e){}
+        try{
+          const lv = localStorage.getItem(key);
+          if (lv !== null) return { key, value: lv };
+        }catch(e){}
+        return null;
       },
       async set(key, value){
         try{
+          await idbSet(key, value);
+        }catch(e){
+          // Si IndexedDB no funciona, se intenta localStorage. Si también falla,
+          // el error SE PROPAGA para que la app avise (antes se ignoraba en silencio).
           localStorage.setItem(key, value);
           return { key, value };
-        }catch(e){ return null; }
+        }
+        try{ localStorage.removeItem(key); }catch(e){}
+        return { key, value };
       },
       async delete(key){
-        try{ localStorage.removeItem(key); return { key, deleted: true }; }
-        catch(e){ return null; }
+        try{ await idbDelete(key); }catch(e){}
+        try{ localStorage.removeItem(key); }catch(e){}
+        return { key, deleted: true };
       },
       async list(prefix){
         try{
@@ -805,6 +863,8 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
         }catch(e){ return null; }
       }
     };
+    // Pide al navegador que no borre estos datos si se queda sin espacio.
+    try{ if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); }catch(e){}
   }
 
   let clients = [];
@@ -841,23 +901,78 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     });
   }
 
+  // ============================================================
+  // RESPALDO EN LA NUBE (Firestore) — el celular es la fuente de verdad.
+  // - Cada clienta, pago, servicio y producto se guarda como su PROPIO documento
+  //   (así nunca se pasa del límite de 1 MB por documento, aunque haya muchas fotos).
+  // - La nube NUNCA pisa automáticamente lo que hay en el celular. Solo se usa para
+  //   recuperar datos si el celular está vacío (celular nuevo o datos borrados) o
+  //   cuando se toca "Restaurar desde la nube".
+  // ============================================================
+  const SYNC_COLLECTIONS = ['clients', 'payments', 'services', 'products'];
+  let syncState = { clients: {}, payments: {}, services: {}, products: {} };
+  let syncStateExisted = false;
+  let syncTimer = null;
+  let syncRunning = false;
+  let syncAgain = false;
+  let syncLastError = '';
+  let syncBadgeState = 'off';
+
+  function hashStr(str){
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++){
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(36) + ':' + str.length;
+  }
+
+  function computeSyncDiff(arrays, state){
+    const sets = [], deletes = [];
+    for (const col of SYNC_COLLECTIONS){
+      const items = arrays[col] || [];
+      const known = state[col] || {};
+      const seen = new Set();
+      for (const it of items){
+        if (!it || it.id === undefined || it.id === null) continue;
+        const id = String(it.id);
+        seen.add(id);
+        const json = JSON.stringify(it);
+        const h = hashStr(json);
+        if (known[id] !== h) sets.push({ col, id, json, hash: h });
+      }
+      for (const id of Object.keys(known)){
+        if (!seen.has(id)) deletes.push({ col, id });
+      }
+    }
+    return { sets, deletes };
+  }
+
+  function explainSyncError(code){
+    const c = String(code || '');
+    if (c.includes('permission-denied')) return 'Firebase no deja guardar todavía: hay que actualizar las reglas de Firestore (Firestore Database → Reglas).';
+    if (c === 'offline' || c.includes('unavailable') || c.includes('network') || c === 'timeout') return 'No hay conexión a internet en este momento. Se reintentará solo cuando vuelva.';
+    if (c.includes('auth/')) return 'Problema con la sesión de Firebase (' + c + '). Cierra sesión y vuelve a entrar.';
+    return 'Detalle técnico: ' + (c || 'desconocido');
+  }
+
   function updateSyncBadge(state){
     // state: 'off' | 'connecting' | 'on' | 'error'
+    syncBadgeState = state;
     const el = $('syncBadge');
     if (!el) return;
+    el.style.display = 'inline-block';
+    el.style.cursor = 'pointer';
     if (state === 'on'){
-      el.textContent = '☁ Sincronizado';
-      el.style.display = 'inline-block';
+      el.textContent = '☁ Respaldado';
       el.style.background = 'rgba(62,143,92,.18)';
       el.style.color = '#2E6B44';
     } else if (state === 'connecting'){
-      el.textContent = '☁ Conectando...';
-      el.style.display = 'inline-block';
+      el.textContent = '☁ Respaldando...';
       el.style.background = 'rgba(0,0,0,.08)';
       el.style.color = '#6B6B6B';
     } else if (state === 'error'){
-      el.textContent = '⚠ Sin conexión a la nube';
-      el.style.display = 'inline-block';
+      el.textContent = '⚠ Sin respaldo en la nube (toca aquí)';
       el.style.background = 'rgba(198,66,94,.2)';
       el.style.color = '#A03A50';
     } else {
@@ -865,32 +980,144 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     }
   }
 
-  async function pushToCloud(field){
-    // field: 'clients' | 'payments' | 'services' | 'products' | undefined (todo, solo para la primera subida)
-    // IMPORTANTE: solo se sube (con merge) la parte que cambió, nunca el documento
-    // completo. Así, si otra sesión guarda algo de otra sección con datos
-    // desactualizados, no borra lo que ya estaba guardado en la nube.
-    if (!SYNC_ENABLED || !cloudReady || applyingRemoteUpdate){
-      pendingLocalPush = !cloudReady && SYNC_ENABLED;
+  async function loadSyncState(){
+    try{
+      const r = await window.storage.get('syncState', false);
+      if (r && r.value){
+        const st = JSON.parse(r.value);
+        syncState = { clients: st.clients || {}, payments: st.payments || {}, services: st.services || {}, products: st.products || {} };
+        syncStateExisted = true;
+      }
+    }catch(e){}
+  }
+  async function saveSyncState(){
+    try{ await window.storage.set('syncState', JSON.stringify(syncState), false); }catch(e){}
+  }
+
+  function scheduleSync(delay){
+    if (!SYNC_ENABLED) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(runSync, delay === undefined ? 1500 : delay);
+  }
+
+  async function runSync(){
+    if (!SYNC_ENABLED || !cloudDb) return;
+    if (syncRunning){ syncAgain = true; return; }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false){
+      syncLastError = 'offline';
+      updateSyncBadge('error');
+      scheduleSync(30000);
       return;
     }
+    syncRunning = true;
+    syncAgain = false;
     try{
-      const ref = doc(cloudDb, ...SALON_DOC);
-      const ts = Date.now();
-      lastPushAt = ts;
-      const payload = field
-        ? { [field]: field === 'clients' ? clients : field === 'payments' ? payments : field === 'services' ? services : products,
-            updatedAt: new Date(ts).toISOString() }
-        : { clients, payments, services, products, updatedAt: new Date(ts).toISOString() };
-      await setDoc(ref, payload, { merge: true });
+      const diff = computeSyncDiff({ clients, payments, services, products }, syncState);
+      if (!diff.sets.length && !diff.deletes.length){
+        syncLastError = '';
+        updateSyncBadge('on');
+        return;
+      }
+      updateSyncBadge('connecting');
+      let batch = writeBatch(cloudDb), ops = 0, bytes = 0, pending = [];
+      const commit = async () => {
+        if (!ops) return;
+        await Promise.race([
+          batch.commit(),
+          new Promise((_, reject) => setTimeout(() => reject({ code: 'timeout' }), 30000))
+        ]);
+        for (const p of pending){
+          if (p.del) delete syncState[p.col][p.id];
+          else syncState[p.col][p.id] = p.hash;
+        }
+        await saveSyncState();
+        batch = writeBatch(cloudDb); ops = 0; bytes = 0; pending = [];
+      };
+      for (const s of diff.sets){
+        if (s.json.length > 900000){ console.warn('Elemento demasiado grande, no se respalda', s.col, s.id); continue; }
+        if (ops >= 100 || bytes + s.json.length > 2500000) await commit();
+        batch.set(doc(cloudDb, ...SALON_DOC, s.col, encodeURIComponent(s.id)), JSON.parse(s.json));
+        ops++; bytes += s.json.length; pending.push({ col: s.col, id: s.id, hash: s.hash });
+      }
+      for (const d of diff.deletes){
+        if (ops >= 100) await commit();
+        batch.delete(doc(cloudDb, ...SALON_DOC, d.col, encodeURIComponent(d.id)));
+        ops++; pending.push({ col: d.col, id: d.id, del: true });
+      }
+      await commit();
+      syncLastError = '';
+      updateSyncBadge('on');
     }catch(e){
-      console.error('No se pudo sincronizar con la nube', e);
+      console.error('No se pudo respaldar en la nube', e);
+      syncLastError = (e && (e.code || e.message)) || 'error';
       updateSyncBadge('error');
+      scheduleSync(60000);
+    }finally{
+      syncRunning = false;
+      if (syncAgain) scheduleSync(1500);
+    }
+  }
+
+  async function fetchCloudData(){
+    const out = { clients: [], payments: [], services: [], products: [] };
+    let any = false;
+    for (const col of SYNC_COLLECTIONS){
+      const snap = await getDocs(collection(cloudDb, ...SALON_DOC, col));
+      snap.forEach(d => { out[col].push(d.data()); any = true; });
+    }
+    if (!any){
+      // Formato anterior: un solo documento con todo adentro.
+      const legacy = await getDoc(doc(cloudDb, ...SALON_DOC));
+      if (legacy.exists()){
+        const d = legacy.data();
+        for (const col of SYNC_COLLECTIONS){
+          out[col] = Array.isArray(d[col]) ? d[col] : [];
+          if (out[col].length) any = true;
+        }
+      }
+    }
+    return any ? out : null;
+  }
+
+  async function applyCloudData(data){
+    clients = data.clients || [];
+    payments = data.payments || [];
+    services = data.services || [];
+    products = data.products || [];
+    await window.storage.set('clients', JSON.stringify(clients), false);
+    await window.storage.set('payments', JSON.stringify(payments), false);
+    await window.storage.set('services', JSON.stringify(services), false);
+    await window.storage.set('products', JSON.stringify(products), false);
+    const fresh = { clients: {}, payments: {}, services: {}, products: {} };
+    const diff = computeSyncDiff({ clients, payments, services, products }, fresh);
+    for (const x of diff.sets) fresh[x.col][x.id] = x.hash;
+    syncState = fresh;
+    await saveSyncState();
+    render();
+  }
+
+  async function restoreFromCloud(){
+    if (!cloudDb){ showToast('La nube aún no está lista. Intenta en unos segundos.'); return; }
+    try{
+      showToast('Consultando la nube...');
+      const data = await fetchCloudData();
+      if (!data){ alert('Todavía no hay datos respaldados en la nube.'); return; }
+      const msg = 'En la nube hay: ' + data.products.length + ' productos, ' + data.clients.length + ' clientas, ' +
+        data.payments.length + ' pagos/facturas y ' + data.services.length + ' servicios.\n\n' +
+        'En este celular hay: ' + products.length + ' productos, ' + clients.length + ' clientas, ' +
+        payments.length + ' pagos/facturas y ' + services.length + ' servicios.\n\n' +
+        '¿Reemplazar lo de este celular por lo de la nube?';
+      if (!confirm(msg)) return;
+      await applyCloudData(data);
+      showToast('Datos restaurados desde la nube');
+    }catch(e){
+      console.error('No se pudo restaurar desde la nube', e);
+      alert('No se pudo leer la nube. ' + explainSyncError((e && (e.code || e.message)) || ''));
     }
   }
 
   async function initCloudSync(){
-    if (!SYNC_ENABLED) { updateSyncBadge('off'); return; }
+    if (!SYNC_ENABLED){ updateSyncBadge('off'); return; }
     updateSyncBadge('connecting');
     try{
       const app = getFirebaseApp();
@@ -899,39 +1126,24 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
         await signInAnonymously(auth);
       }
       cloudDb = getFirestore(app);
-      const ref = doc(cloudDb, ...SALON_DOC);
-      onSnapshot(ref, (snap) => {
-        cloudReady = true;
-        updateSyncBadge('on');
-        if (!snap.exists()){
-          // Primera vez: sube lo que ya haya en este celular.
-          pushToCloud();
-          return;
+      await loadSyncState();
+      const localEmpty = !clients.length && !payments.length && !services.length && !products.length;
+      if (localEmpty && !syncStateExisted){
+        // Celular nuevo o datos borrados: se intenta recuperar lo respaldado en la nube.
+        const data = await fetchCloudData();
+        if (data){
+          await applyCloudData(data);
+          showToast('Datos recuperados desde la nube');
         }
-        const data = snap.data();
-        // Si este dato que llega de la nube es más viejo (o igual) que lo último
-        // que acabamos de guardar nosotros mismos, es un eco atrasado: lo ignoramos
-        // para no borrar de la pantalla un cambio que ya hicimos.
-        const remoteTs = data.updatedAt ? new Date(data.updatedAt).getTime() : 0;
-        if (lastPushAt && remoteTs && remoteTs < lastPushAt){
-          if (pendingLocalPush){ pendingLocalPush = false; pushToCloud(); }
-          return;
-        }
-        applyingRemoteUpdate = true;
-        clients = data.clients || [];
-        payments = data.payments || [];
-        services = data.services || [];
-        products = data.products || [];
-        render();
-        applyingRemoteUpdate = false;
-        if (pendingLocalPush){ pendingLocalPush = false; pushToCloud(); }
-      }, (err) => {
-        console.error('Error de sincronización', err);
-        updateSyncBadge('error');
-      });
+      }
+      scheduleSync(500);
+      window.addEventListener('online', () => scheduleSync(500));
+      setInterval(() => scheduleSync(0), 120000);
     }catch(e){
-      console.error('No se pudo iniciar la sincronización', e);
+      console.error('No se pudo iniciar el respaldo en la nube', e);
+      syncLastError = (e && (e.code || e.message)) || 'error';
       updateSyncBadge('error');
+      setTimeout(initCloudSync, 60000);
     }
   }
 
@@ -1759,22 +1971,22 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
   async function saveClients(){
     try{ await window.storage.set('clients', JSON.stringify(clients), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud('clients');
+    scheduleSync();
   }
   async function savePayments(){
     try{ await window.storage.set('payments', JSON.stringify(payments), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud('payments');
+    scheduleSync();
   }
   async function saveServices(){
     try{ await window.storage.set('services', JSON.stringify(services), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud('services');
+    scheduleSync();
   }
   async function saveProducts(){
     try{ await window.storage.set('products', JSON.stringify(products), false); }
     catch(e){ showToast('No se pudo guardar. Intenta de nuevo.'); }
-    pushToCloud('products');
+    scheduleSync();
   }
 
   function clientVisits(clientId){
@@ -2266,22 +2478,69 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     showToast('Producto eliminado');
   }
 
-  function downloadBackup(){
+  function buildBackupFile(){
     const data = {
       exportedAt: new Date().toISOString(),
       clients, payments, services, products
     };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const stamp = new Date().toISOString().slice(0,10);
+    const fileName = `respaldo_blossom_shop_${stamp}.json`;
+    return { json: JSON.stringify(data, null, 2), fileName };
+  }
+
+  async function markBackupDone(){
+    try{ await window.storage.set('lastBackupAt', String(Date.now()), false); }catch(e){}
+    const el = $('backupReminder');
+    if (el) el.style.display = 'none';
+  }
+
+  function downloadBackup(){
+    const { json, fileName } = buildBackupFile();
+    const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const stamp = new Date().toISOString().slice(0,10);
     a.href = url;
-    a.download = `respaldo_blossom_shop_${stamp}.json`;
+    a.download = fileName;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    markBackupDone();
     showToast('Copia de seguridad descargada');
+  }
+
+  // Abre el menú de compartir del celular con el respaldo ya adjunto: ahí se elige "Drive".
+  async function shareBackup(){
+    const { json, fileName } = buildBackupFile();
+    try{
+      const file = new File([json], fileName, { type: 'application/json' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })){
+        await navigator.share({ files: [file], title: 'Respaldo Blossom Shop' });
+        await markBackupDone();
+        showToast('Respaldo enviado');
+        return;
+      }
+    }catch(e){
+      if (e && e.name === 'AbortError') return;   // canceló el menú
+    }
+    downloadBackup();   // si el celular no permite compartir archivos, se descarga
+  }
+
+  async function checkBackupReminder(){
+    try{
+      if (!(clients.length || payments.length || products.length || services.length)) return;
+      const r = await window.storage.get('lastBackupAt', false);
+      const last = r && r.value ? Number(r.value) : 0;
+      if (Date.now() - last > 24 * 60 * 60 * 1000){
+        const el = $('backupReminder');
+        if (el){
+          $('backupReminderText').textContent = last
+            ? 'Hace más de un día que no guardas una copia en tu Drive.'
+            : 'Aún no has guardado ninguna copia en tu Drive. Hazlo ahora para tener todo seguro.';
+          el.style.display = 'flex';
+        }
+      }
+    }catch(e){}
   }
 
   function restoreBackup(file){
@@ -2400,6 +2659,17 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     reader.readAsDataURL(file);
   });
   $('downloadBackupBtn').addEventListener('click', downloadBackup);
+  $('shareBackupBtn').addEventListener('click', shareBackup);
+  $('restoreCloudBtn').addEventListener('click', restoreFromCloud);
+  $('backupReminderBtn').addEventListener('click', shareBackup);
+  $('backupReminderClose').addEventListener('click', () => { $('backupReminder').style.display = 'none'; });
+  $('syncBadge').addEventListener('click', () => {
+    if (syncBadgeState === 'error'){
+      alert('No se pudo respaldar en la nube.\n\n' + explainSyncError(syncLastError) + '\n\nTus datos siguen guardados en este celular.');
+    } else if (syncBadgeState === 'on'){
+      alert('Tus datos están respaldados en la nube.');
+    }
+  });
   $('downloadExcelBtn').addEventListener('click', downloadExcelLedger);
   $('restoreFileInput').addEventListener('change', (e) => restoreBackup(e.target.files[0]));
 
@@ -2437,6 +2707,8 @@ let lastPushAt = 0; // para no dejar que un eco viejo de la nube borre un cambio
     // datos ya guardados, sin que haga falta un segundo dispositivo.
     await loadData();
     initCloudSync();
+    checkBackupReminder();
+    if (SYNC_ENABLED) $('restoreCloudBtn').style.display = '';
     if (LOGIN_ENABLED){
       $('logoutBlock').style.display = '';
       $('logoutBtn').addEventListener('click', async () => {
