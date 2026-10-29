@@ -1441,6 +1441,16 @@ function getFirebaseAuthInstance(){
   function itemLabel(i){
     return i.qty && i.qty > 1 ? `${i.name} x${i.qty}` : i.name;
   }
+  // Historial de abonos de una venta. Las ventas viejas (sin historial) cuentan su abono único.
+  function abonoList(p){
+    if (Array.isArray(p.abonos) && p.abonos.length) return p.abonos;
+    return p.advance > 0 ? [{ date: p.serviceDate, amount: p.advance }] : [];
+  }
+  function fmtAbonoDate(iso){
+    const d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleDateString('es-VE', { day:'numeric', month:'short' });
+  }
+
   function paymentServiceSummary(p){
     return paymentItems(p).map(itemLabel).join(', ') || 'Servicio';
   }
@@ -1586,7 +1596,7 @@ function getFirebaseAuthInstance(){
       }
     }));
     const imageExtra = items.reduce((s, item, idx) => s + (itemImages[idx] ? 24 : 0), 0);
-    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + (371 + (bcv ? 34 : 0)) + 30 + 40 + imageExtra + (payment.advance > 0 ? 78 : 0);
+    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + (371 + (bcv ? 34 : 0)) + 30 + 40 + imageExtra + (payment.advance > 0 ? 40 + 38 * abonoList(payment).length : 0);
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
 
@@ -1747,15 +1757,19 @@ function getFirebaseAuthInstance(){
       ctx.fillText('Subtotal', 60, y);
       ctx.textAlign = 'right';
       ctx.fillText(fmtMoney(payment.total), W - 60, y);
-      y += 38;
-      ctx.textAlign = 'left';
-      ctx.fillStyle = '#6B6B6B';
-      ctx.font = '500 20px Inter, sans-serif';
-      ctx.fillText('Abono recibido', 60, y);
-      ctx.textAlign = 'right';
-      ctx.fillStyle = '#2E8B57';
-      ctx.font = '700 20px Inter, sans-serif';
-      ctx.fillText('- ' + fmtMoney(payment.advance), W - 60, y);
+      const abList = abonoList(payment);
+      abList.forEach((ab, i) => {
+        y += 38;
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#6B6B6B';
+        ctx.font = '500 20px Inter, sans-serif';
+        const when = fmtAbonoDate(ab.date);
+        ctx.fillText(abList.length > 1 ? `Abono ${i+1}${when ? ' · ' + when : ''}` : 'Abono recibido', 60, y);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#2E8B57';
+        ctx.font = '700 20px Inter, sans-serif';
+        ctx.fillText('- ' + fmtMoney(ab.amount), W - 60, y);
+      });
     }
     const amountDue = hasAbono ? payment.remaining : payment.total;
 
@@ -1917,7 +1931,11 @@ function getFirebaseAuthInstance(){
     const hasAbono = payment.advance > 0;
     if (hasAbono){
       msg += `\nSubtotal: ${fmtMoney(payment.total)}\n`;
-      msg += `Abono recibido: - ${fmtMoney(payment.advance)}\n`;
+      const abL = abonoList(payment);
+      abL.forEach((ab, i) => {
+        const when = fmtAbonoDate(ab.date);
+        msg += `${abL.length > 1 ? 'Abono ' + (i+1) + (when ? ' (' + when + ')' : '') : 'Abono recibido'}: - ${fmtMoney(ab.amount)}\n`;
+      });
       msg += `*TOTAL A PAGAR: ${fmtMoney(payment.remaining)}*\n`;
       if (bcvCache && payment.remaining > 0) {
         msg += `≈ ${fmtBs(payment.remaining * bcvCache.rate)} (tasa BCV ${bcvCache.rate.toLocaleString('es-VE',{minimumFractionDigits:2})} Bs/€)\n`;
@@ -2282,6 +2300,7 @@ function getFirebaseAuthInstance(){
               <div class="ledger-total">${fmtMoney(p.total)}</div>
               <div class="ledger-sub">${p.remaining > 0 ? 'Debe ' + fmtMoney(p.remaining) : 'Pagado completo'}</div>
               <div class="ledger-icons">
+                ${p.remaining > 0 ? `<button class="btn-mini" style="padding:4px 9px;" onclick="BlossomShopApp.addAbono('${p.id}')">+ Abonar</button>` : ''}
                 <button class="icon-btn" title="Factura" onclick="BlossomShopApp.showInvoice('${p.id}')">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2h9l3 3v17H6z"/><path d="M9 8h6M9 12h6M9 16h4"/></svg>
                 </button>
@@ -2336,6 +2355,7 @@ function getFirebaseAuthInstance(){
           <div class="rem-actions">
             <a class="btn-mini wa" href="${waLink(client.phone, msg)}" target="_blank" rel="noopener">Recordar por WhatsApp</a>
             <button class="btn-mini" onclick="BlossomShopApp.showInvoice('${p.id}')">Factura</button>
+            <button class="btn-mini" onclick="BlossomShopApp.addAbono('${p.id}')">+ Abonar</button>
             <button class="btn-mini" onclick="BlossomShopApp.markPaid('${p.id}')">Marcar cobrado</button>
           </div>
         </div>`;
@@ -2432,6 +2452,7 @@ function getFirebaseAuthInstance(){
     payments.push({
       id: 'p_' + Date.now(),
       clientId, items, total, advance, remaining,
+      abonos: advance > 0 ? [{ date: new Date().toISOString(), amount: advance }] : [],
       serviceDate: serviceDate || new Date().toISOString().slice(0,16),
       reminderDate: remaining > 0 ? reminderDate : '',
     });
@@ -2448,8 +2469,31 @@ function getFirebaseAuthInstance(){
     showToast('Venta registrada');
   }
 
+  // Registra un abono posterior: se suma a lo ya abonado y baja lo que falta por pagar.
+  async function addAbono(paymentId){
+    const p = payments.find(p => p.id === paymentId);
+    if (!p || p.remaining <= 0) return;
+    const txt = prompt(`Debe ${fmtMoney(p.remaining)}. ¿Cuánto abona ahora? (€)`, '');
+    if (txt === null) return;
+    const amount = parseFloat(String(txt).replace(',', '.'));
+    if (!(amount > 0)){ showToast('Escribe un monto mayor que 0'); return; }
+    if (amount > p.remaining + 0.0001){ showToast('El abono no puede ser mayor a lo que debe (' + fmtMoney(p.remaining) + ')'); return; }
+    p.abonos = abonoList(p).slice();
+    p.abonos.push({ date: new Date().toISOString(), amount });
+    p.advance = Math.round((p.advance + amount) * 100) / 100;
+    p.remaining = Math.round(Math.max(p.total - p.advance, 0) * 100) / 100;
+    if (p.remaining <= 0){ p.remaining = 0; p.reminderDate = ''; }
+    await savePayments();
+    render();
+    showToast(p.remaining > 0 ? 'Abono registrado · falta ' + fmtMoney(p.remaining) : 'Abono registrado · pagado completo');
+  }
+
   async function markPaid(paymentId){
     const p = payments.find(p => p.id === paymentId);
+    if (p && p.remaining > 0){
+      p.abonos = abonoList(p).slice();
+      p.abonos.push({ date: new Date().toISOString(), amount: p.remaining });
+    }
     if (p){ p.advance = p.total; p.remaining = 0; p.reminderDate = ''; }
     await savePayments();
     render();
@@ -2766,7 +2810,7 @@ function getFirebaseAuthInstance(){
   $('downloadExcelBtn').addEventListener('click', downloadExcelLedger);
   $('restoreFileInput').addEventListener('change', (e) => restoreBackup(e.target.files[0]));
 
-  window.BlossomShopApp = { editClient, markPaid, deletePayment, editService, deleteService, editProduct, deleteProduct, changeProductImage, showInvoice };
+  window.BlossomShopApp = { editClient, addAbono, markPaid, deletePayment, editService, deleteService, editProduct, deleteProduct, changeProductImage, showInvoice };
 
   // Instalación como app (PWA)
   let deferredInstallPrompt = null;
