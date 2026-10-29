@@ -559,11 +559,11 @@
       <b id="totalPreview">€0</b>
     </div>
     <div class="field">
-      <label>Anticipo recibido</label>
-      <input id="payAdvance" type="number" inputmode="decimal" placeholder="0">
+      <label>Abono recibido (se descuenta del total)</label>
+      <input id="payAdvance" type="number" inputmode="decimal" min="0" step="any" placeholder="0">
     </div>
     <div class="remaining-box">
-      <span>Resta por cobrar</span>
+      <span>Total a pagar</span>
       <b id="remainingPreview">€0</b>
     </div>
     <div class="field">
@@ -1371,6 +1371,16 @@ function getFirebaseAuthInstance(){
     return div;
   }
 
+  // La primera fila de la venta se crea antes de que carguen los productos guardados, y
+  // al agregar o borrar productos las filas ya abiertas quedaban con la lista vieja.
+  // Esto las pone al día sin tocar lo que la persona ya escribió.
+  function refreshItemCatalogOptions(){
+    document.querySelectorAll('#itemsContainer .item-catalog').forEach(sel => {
+      const cur = sel.value;
+      sel.innerHTML = catalogOptionsHTML(cur);
+    });
+  }
+
   function ensureAtLeastOneRow(){
     if ($('itemsContainer').children.length === 0){
       addItemRow();
@@ -1576,7 +1586,7 @@ function getFirebaseAuthInstance(){
       }
     }));
     const imageExtra = items.reduce((s, item, idx) => s + (itemImages[idx] ? 24 : 0), 0);
-    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + (371 + (bcv ? 34 : 0)) + 30 + 40 + imageExtra;
+    canvas.height = 960 + Math.max(items.length - 1, 0) * 40 + (bcv ? 55 : 0) + (371 + (bcv ? 34 : 0)) + 30 + 40 + imageExtra + (payment.advance > 0 ? 78 : 0);
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
 
@@ -1726,27 +1736,28 @@ function getFirebaseAuthInstance(){
       if (prodImg) y += 24;
     });
 
-    if (payment.advance > 0){
+    // Si hubo abono: el abono se descuenta y el TOTAL de la
+    // factura pasa a ser lo que falta por pagar.
+    const hasAbono = payment.advance > 0;
+    if (hasAbono){
       y += 40;
       ctx.textAlign = 'left';
       ctx.fillStyle = '#6B6B6B';
       ctx.font = '500 20px Inter, sans-serif';
-      ctx.fillText('Anticipo pagado', 60, y);
+      ctx.fillText('Subtotal', 60, y);
       ctx.textAlign = 'right';
-      ctx.fillStyle = '#B8860B';
+      ctx.fillText(fmtMoney(payment.total), W - 60, y);
+      y += 38;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#6B6B6B';
+      ctx.font = '500 20px Inter, sans-serif';
+      ctx.fillText('Abono recibido', 60, y);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#2E8B57';
       ctx.font = '700 20px Inter, sans-serif';
       ctx.fillText('- ' + fmtMoney(payment.advance), W - 60, y);
     }
-    if (payment.remaining > 0){
-      y += 38;
-      ctx.textAlign = 'left';
-      ctx.fillStyle = '#C6425E';
-      ctx.font = '700 20px Inter, sans-serif';
-      ctx.fillText('Saldo restante', 60, y);
-      ctx.textAlign = 'right';
-      ctx.fillStyle = '#B8860B';
-      ctx.fillText(fmtMoney(payment.remaining), W - 60, y);
-    }
+    const amountDue = hasAbono ? payment.remaining : payment.total;
 
     // Solid divider
     y += 34;
@@ -1758,19 +1769,19 @@ function getFirebaseAuthInstance(){
     y += 60;
     ctx.textAlign = 'left';
     ctx.fillStyle = '#111111';
-    ctx.font = '700 28px Sora, sans-serif';
-    ctx.fillText('TOTAL', 60, y);
+    ctx.font = hasAbono ? '700 26px Sora, sans-serif' : '700 28px Sora, sans-serif';
+    ctx.fillText(hasAbono ? 'TOTAL A PAGAR' : 'TOTAL', 60, y);
     ctx.textAlign = 'right';
     ctx.fillStyle = '#B8860B';
     ctx.font = '800 44px Sora, sans-serif';
-    ctx.fillText(fmtMoney(payment.total), W - 60, y);
+    ctx.fillText(fmtMoney(amountDue), W - 60, y);
 
-    if (bcv){
+    if (bcv && amountDue > 0){
       y += 42;
       ctx.textAlign = 'right';
       ctx.fillStyle = '#B8860B';
       ctx.font = '600 22px Inter, sans-serif';
-      ctx.fillText('≈ ' + fmtBs(payment.total * bcv.rate), W - 60, y);
+      ctx.fillText('≈ ' + fmtBs(amountDue * bcv.rate), W - 60, y);
       ctx.textAlign = 'left';
       ctx.font = '400 14px Inter, sans-serif';
       const fecha = new Date(bcv.fetchedAt).toLocaleDateString('es-VE');
@@ -1836,11 +1847,11 @@ function getFirebaseAuthInstance(){
     ctx.font = '600 21px Inter, sans-serif';
     ctx.fillText(`ID: ${BINANCE.id}`, 84, py);
 
-    if (bcv){
+    if (bcv && payment.remaining > 0){
       py += 34;
       ctx.font = '700 22px Inter, sans-serif';
       ctx.fillStyle = '#B8860B';
-      ctx.fillText(`Monto a pagar: ${fmtBs(payment.total * bcv.rate)}`, 84, py);
+      ctx.fillText(`Monto a pagar: ${fmtBs(payment.remaining * bcv.rate)}`, 84, py);
     }
 
     // Separación respecto a Binance
@@ -1903,20 +1914,28 @@ function getFirebaseAuthInstance(){
     items.forEach(item => {
       msg += `${itemLabel(item)}: ${fmtMoney(item.price * (item.qty||1))}\n`;
     });
-    msg += `\nTotal: ${fmtMoney(payment.total)}\n`;
-    if (bcvCache) {
-      msg += `≈ ${fmtBs(payment.total * bcvCache.rate)} (tasa BCV ${bcvCache.rate.toLocaleString('es-VE',{minimumFractionDigits:2})} Bs/€)\n`;
+    const hasAbono = payment.advance > 0;
+    if (hasAbono){
+      msg += `\nSubtotal: ${fmtMoney(payment.total)}\n`;
+      msg += `Abono recibido: - ${fmtMoney(payment.advance)}\n`;
+      msg += `*TOTAL A PAGAR: ${fmtMoney(payment.remaining)}*\n`;
+      if (bcvCache && payment.remaining > 0) {
+        msg += `≈ ${fmtBs(payment.remaining * bcvCache.rate)} (tasa BCV ${bcvCache.rate.toLocaleString('es-VE',{minimumFractionDigits:2})} Bs/€)\n`;
+      }
+    } else {
+      msg += `\nTotal: ${fmtMoney(payment.total)}\n`;
+      if (bcvCache) {
+        msg += `≈ ${fmtBs(payment.total * bcvCache.rate)} (tasa BCV ${bcvCache.rate.toLocaleString('es-VE',{minimumFractionDigits:2})} Bs/€)\n`;
+      }
     }
-    if (payment.advance > 0) msg += `Anticipo pagado: ${fmtMoney(payment.advance)}\n`;
-    if (payment.remaining > 0) msg += `Saldo restante: ${fmtMoney(payment.remaining)}\n`;
     msg += `\n💳 *MÉTODOS DE PAGO*\n`;
     msg += `\n📱 *Pago Móvil*\n`;
     msg += `Banco: ${PAGO_MOVIL.banco}\n`;
     msg += `C.I.: ${PAGO_MOVIL.ci}\n`;
     msg += `Teléfono: ${PAGO_MOVIL.telefono}\n`;
     msg += `\n💠 *Binance*\nID: ${BINANCE.id}\n`;
-    if (bcvCache){
-      msg += `Monto a pagar: ${fmtBs(payment.total * bcvCache.rate)}\n`;
+    if (bcvCache && payment.remaining > 0){
+      msg += `Monto a pagar: ${fmtBs(payment.remaining * bcvCache.rate)}\n`;
     }
     msg += `${PAYMENT_NOTE}\n`;
     msg += `\n¡Gracias por tu preferencia! 💕`;
@@ -2344,6 +2363,7 @@ function getFirebaseAuthInstance(){
   }
 
   function render(){
+    refreshItemCatalogOptions();
     renderStats();
     renderClients();
     renderPaySelect();
@@ -2405,6 +2425,8 @@ function getFirebaseAuthInstance(){
 
     if (!clientId){ showToast('Selecciona un cliente'); return; }
     if (items.length === 0){ showToast('Agrega al menos un servicio o producto con su precio'); return; }
+    if (advance < 0){ showToast('El abono no puede ser negativo'); return; }
+    if (advance > total){ showToast('El abono no puede ser mayor que el total de la venta'); return; }
 
     const remaining = Math.max(total - advance, 0);
     payments.push({
@@ -2428,7 +2450,7 @@ function getFirebaseAuthInstance(){
 
   async function markPaid(paymentId){
     const p = payments.find(p => p.id === paymentId);
-    if (p){ p.remaining = 0; p.reminderDate = ''; }
+    if (p){ p.advance = p.total; p.remaining = 0; p.reminderDate = ''; }
     await savePayments();
     render();
     showToast('Marcado como cobrado');
@@ -2653,8 +2675,8 @@ function getFirebaseAuthInstance(){
           'Cliente': client.name,
           'Servicios / Productos': paymentServiceSummary(p),
           'Total': p.total,
-          'Anticipo': p.advance,
-          'Restante': p.remaining,
+          'Abono': p.advance,
+          'Por pagar': p.remaining,
         };
       });
     if (rows.length === 0){
