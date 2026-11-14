@@ -645,6 +645,10 @@
           <input id="newProductColor" placeholder="Color">
         </div>
       </div>
+      <div class="field" style="margin-top:8px; margin-bottom:0;">
+        <input id="newProductCategory" list="categoryOptions" placeholder="Categoría (ej: Perfumes, Ropa, Accesorios)" autocomplete="off">
+        <datalist id="categoryOptions"></datalist>
+      </div>
       <div class="field" style="margin-top:8px; margin-bottom:0; display:flex; align-items:center; gap:10px;">
         <img id="newProductPreview" style="display:none; width:48px; height:48px; object-fit:cover; border-radius:8px; border:1px solid var(--line);">
         <label for="newProductImage" style="flex:1; font-size:12.5px; color:var(--muted); border:1px dashed var(--line); border-radius:10px; padding:8px 10px; text-align:center; cursor:pointer;">📷 Agregar foto del producto (catálogo)</label>
@@ -1190,7 +1194,7 @@ function getFirebaseAuthInstance(){
   }
   function publicProduct(p){
     return { name: p.name || '', price: Number(p.price) || 0, stock: Math.max(parseInt(p.stock, 10) || 0, 0),
-             size: p.size || '', color: p.color || '', image: p.image || '' };
+             size: p.size || '', color: p.color || '', category: (p.category || '').trim(), image: p.image || '' };
   }
   function renderCatalogStatus(){
     const el = $('catalogPubStatus');
@@ -2393,7 +2397,12 @@ function getFirebaseAuthInstance(){
     return `<span class="stock-badge">${stock} en stock</span>`;
   }
 
+  function categoryNames(){
+    return [...new Set(products.map(p => (p.category || '').trim()).filter(Boolean))].sort((a,b) => a.localeCompare(b));
+  }
   function renderProducts(){
+    const dl = $('categoryOptions');
+    if (dl) dl.innerHTML = categoryNames().map(c => '<option value="' + esc(c) + '"></option>').join('');
     const list = $('productList');
     if (products.length === 0){
       list.innerHTML = '<p style="color:var(--muted); font-size:12.5px;">Aún no tienes productos guardados.</p>';
@@ -2403,6 +2412,7 @@ function getFirebaseAuthInstance(){
           <img src="${p.image || ''}" loading="lazy" decoding="async" onerror="this.style.display='none'" style="${p.image ? '' : 'display:none;'} width:44px; height:44px; object-fit:cover; border-radius:8px; margin-right:8px; flex-shrink:0;">
           <div style="flex:1;">
             <div class="service-name">${p.name}${p.size ? ' · Talla ' + p.size : ''}${p.color ? ' · ' + p.color : ''}</div>
+            ${p.category ? `<div style="font-size:11px; color:var(--muted);">🏷 ${esc(p.category)}</div>` : ''}
             <div class="service-price">${fmtMoney(p.price)} ${stockBadge(p.stock)}</div>
           </div>
           <div class="service-actions">
@@ -2800,16 +2810,18 @@ function getFirebaseAuthInstance(){
     const stock = Math.max(parseInt($('newProductStock').value, 10) || 0, 0);
     const size = $('newProductSize').value.trim();
     const color = $('newProductColor').value.trim();
+    const category = $('newProductCategory').value.trim();
     if (!name){ showToast('Escribe el nombre del producto'); return; }
     const file = $('newProductImage').files[0];
     const image = await resizeImageFile(file, PHOTO_MAX_PX, PHOTO_QUALITY);
-    products.push({ id: 'pr_' + Date.now(), name, price, stock, size, color, image });
+    products.push({ id: 'pr_' + Date.now(), name, price, stock, size, color, category, image });
     await saveProducts();
     $('newProductName').value = '';
     $('newProductPrice').value = '';
     $('newProductStock').value = '';
     $('newProductSize').value = '';
     $('newProductColor').value = '';
+    // la categoría se deja puesta: suele agregarse varios productos seguidos de la misma
     $('newProductImage').value = '';
     $('newProductPreview').style.display = 'none';
     render();
@@ -2829,11 +2841,15 @@ function getFirebaseAuthInstance(){
     if (newSize === null) return;
     const newColor = prompt('Color:', p.color || '');
     if (newColor === null) return;
+    const cats = categoryNames();
+    const newCategory = prompt('Categoría de la tienda' + (cats.length ? ' (existentes: ' + cats.join(', ') + ')' : '') + ':', p.category || '');
+    if (newCategory === null) return;
     p.name = newName.trim() || p.name;
     p.price = parseFloat(newPriceStr) || p.price;
     p.stock = Math.max(parseInt(newStockStr, 10) || 0, 0);
     p.size = newSize.trim();
     p.color = newColor.trim();
+    p.category = newCategory.trim();
     await saveProducts();
     render();
     showToast('Producto actualizado');
