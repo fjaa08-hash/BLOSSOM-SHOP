@@ -522,6 +522,7 @@
     <div class="tab" data-tab="pago">Pago</div>
     <div class="tab" data-tab="registro">Registro</div>
     <div class="tab" data-tab="tienda">Tienda</div>
+    <div class="tab" data-tab="pedidos">Pedidos <span id="ordersBadge" style="display:none; margin-left:3px; background:#E5484D; color:#fff; border-radius:9px; padding:1px 6px; font-size:10px; font-weight:700;">0</span></div>
     <div class="tab" data-tab="recordatorios">Recordatorios</div>
     <div class="tab" data-tab="ajustes">Ajustes</div>
   </div>
@@ -602,6 +603,16 @@
       <div class="ledger-stat"><b id="storeLowStock">0</b><span>Con poco stock</span></div>
     </div>
     <div class="settings-block">
+      <div id="storeLinkBox" style="margin:0 0 14px; padding:11px 12px; border-radius:14px; background:#FFFBE0; border:1px solid #E9C42B;">
+        <div style="font-size:13px; font-weight:700; color:#4A3500;">🛍 Tu tienda online</div>
+        <div id="storeLinkUrl" style="font-size:12px; color:#6B5200; word-break:break-all; margin:4px 0 8px;"></div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button type="button" class="btn-mini" id="storeLinkCopy">Copiar link</button>
+          <button type="button" class="btn-mini" id="storeLinkShare">Enviar por WhatsApp</button>
+          <button type="button" class="btn-mini" id="storeLinkOpen">Abrir tienda</button>
+        </div>
+        <div id="catalogPubStatus" style="font-size:11.5px; color:#7A6A3A; margin-top:8px;"></div>
+      </div>
       <h3>Inventario de productos</h3>
       <p>Agrega los productos que vendes en tienda, con su precio y cuántas unidades tienes. Al vender uno en "Pago", el inventario baja solo.</p>
       <div id="photoWeightHint" style="display:none; align-items:center; gap:8px; margin:0 0 10px; padding:9px 11px; border-radius:12px; background:#FFF4C9; border:1px solid #E9C42B; font-size:12.5px; color:#4A3500;">
@@ -640,6 +651,15 @@
         <input id="newProductImage" type="file" accept="image/*" style="display:none;">
       </div>
       <button class="btn-main secondary" id="addProductBtn" style="margin-top:10px;">+ Agregar producto</button>
+    </div>
+  </div>
+
+  <!-- PEDIDOS QUE LLEGAN DESDE LA TIENDA ONLINE -->
+  <div class="view" id="view-pedidos">
+    <div class="settings-block">
+      <h3>Pedidos de la tienda online</h3>
+      <p id="ordersIntro">Aquí llegan los pedidos que tus clientas hacen desde el link de la tienda, con su comprobante de pago. Revisa el pago y toca "Convertir en venta": se crea la clienta, la factura y baja el inventario.</p>
+      <div id="ordersList"></div>
     </div>
   </div>
 
@@ -727,7 +747,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-app.js";
 import {
-  getFirestore, doc, collection, writeBatch, getDocs, getDoc
+  getFirestore, doc, collection, writeBatch, getDocs, getDoc, onSnapshot, updateDoc, deleteDoc
 } from "https://www.gstatic.com/firebasejs/12.17.1/firebase-firestore.js";
 import {
   getAuth, signInAnonymously, signInWithEmailAndPassword, onAuthStateChanged, signOut,
@@ -1015,6 +1035,7 @@ function getFirebaseAuthInstance(){
 
   function scheduleSync(delay){
     if (!SYNC_ENABLED) return;
+    if (typeof scheduleCatalogPublish === 'function') scheduleCatalogPublish();
     clearTimeout(syncTimer);
     syncTimer = setTimeout(runSync, delay === undefined ? 1500 : delay);
   }
@@ -1144,6 +1165,231 @@ function getFirebaseAuthInstance(){
     showToast('Subiendo todo a la nube...');
   }
 
+
+  // ============================================================
+  // TIENDA ONLINE (página pública tienda.html)
+  // - La app publica en Firebase una copia pública del inventario con stock
+  //   (colección "catalogo") y la tienda la lee en tiempo real.
+  // - Los pedidos que hacen las clientas llegan a la colección "pedidos".
+  // ============================================================
+  const CATALOG_COL = 'catalogo', ORDERS_COL = 'pedidos';
+  let catalogState = {};          // id -> hash de lo ya publicado
+  let catalogRemoteChecked = false;
+  let catalogTimer = null, catalogRunning = false, catalogAgain = false;
+  let catalogPublishedCount = null, catalogError = '';
+  let orders = [], ordersLoaded = false, ordersError = '', ordersUnsub = null;
+
+  function storeUrl(){
+    try{ return new URL('tienda.html', location.href).href.replace(/[?#].*$/, ''); }
+    catch(e){ return 'tienda.html'; }
+  }
+  function adminSignedIn(){
+    const a = getFirebaseAuthInstance();
+    const u = a && a.currentUser;
+    return !!(u && u.email && AUTHORIZED_EMAILS.includes(u.email.toLowerCase()));
+  }
+  function publicProduct(p){
+    return { name: p.name || '', price: Number(p.price) || 0, stock: Math.max(parseInt(p.stock, 10) || 0, 0),
+             size: p.size || '', color: p.color || '', image: p.image || '' };
+  }
+  function renderCatalogStatus(){
+    const el = $('catalogPubStatus');
+    if (!el) return;
+    if (!SYNC_ENABLED) el.textContent = 'La tienda necesita la sincronización con Firebase activada.';
+    else if (catalogError) el.textContent = '⚠️ No se pudo publicar el catálogo (' + catalogError + '). Revisa las reglas de Firestore.';
+    else if (catalogPublishedCount === null) el.textContent = 'Publicando catálogo…';
+    else el.textContent = '✅ ' + catalogPublishedCount + (catalogPublishedCount === 1 ? ' producto visible' : ' productos visibles') + ' en la tienda (solo los que tienen stock).';
+  }
+  function scheduleCatalogPublish(delay){
+    if (!SYNC_ENABLED) return;
+    clearTimeout(catalogTimer);
+    catalogTimer = setTimeout(publishCatalog, delay === undefined ? 2000 : delay);
+  }
+  async function publishCatalog(){
+    if (!SYNC_ENABLED || !cloudDb || !adminSignedIn()) return;
+    if (catalogRunning){ catalogAgain = true; return; }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    catalogRunning = true; catalogAgain = false;
+    try{
+      const desired = {};
+      products.forEach(p => {
+        const pub = publicProduct(p);
+        if (!p.id || !pub.name || pub.price <= 0 || pub.stock <= 0) return;
+        const json = JSON.stringify(pub);
+        if (json.length > 900000) return;
+        desired[encodeURIComponent(p.id)] = { json, hash: hashStr(json) };
+      });
+      let remote = null;
+      if (!catalogRemoteChecked){
+        remote = new Set();
+        const snap = await getDocs(collection(cloudDb, CATALOG_COL));
+        snap.forEach(d => remote.add(d.id));
+      }
+      const sets = [], dels = [];
+      Object.keys(desired).forEach(id => {
+        if (catalogState[id] !== desired[id].hash || (remote && !remote.has(id))) sets.push(id);
+      });
+      const known = new Set([...Object.keys(catalogState), ...(remote ? [...remote] : [])]);
+      known.forEach(id => { if (!desired[id]) dels.push(id); });
+      let batch = writeBatch(cloudDb), ops = 0;
+      const commit = async () => {
+        if (!ops) return;
+        await batch.commit(); batch = writeBatch(cloudDb); ops = 0;
+      };
+      for (const id of sets){
+        if (ops >= 100) await commit();
+        batch.set(doc(cloudDb, CATALOG_COL, id), JSON.parse(desired[id].json)); ops++;
+      }
+      for (const id of dels){
+        if (ops >= 100) await commit();
+        batch.delete(doc(cloudDb, CATALOG_COL, id)); ops++;
+      }
+      await commit();
+      const next = {};
+      Object.keys(desired).forEach(id => { next[id] = desired[id].hash; });
+      catalogState = next; catalogRemoteChecked = true;
+      try{ await window.storage.set('catalogState', JSON.stringify(catalogState), false); }catch(e){}
+      catalogPublishedCount = Object.keys(desired).length; catalogError = '';
+    }catch(e){
+      console.error('No se pudo publicar el catálogo', e);
+      catalogError = (e && (e.code || e.message)) || 'error';
+      setTimeout(() => scheduleCatalogPublish(0), 60000);
+    }finally{
+      catalogRunning = false;
+      renderCatalogStatus();
+      if (catalogAgain) scheduleCatalogPublish(1500);
+    }
+  }
+
+  function setOrdersBadge(){
+    const n = orders.filter(o => o.status === 'nuevo').length;
+    const b = $('ordersBadge');
+    if (b){ b.textContent = n; b.style.display = n ? 'inline-block' : 'none'; }
+  }
+  function startOrdersListener(){
+    if (!SYNC_ENABLED || !cloudDb || ordersUnsub || !adminSignedIn()) return;
+    ordersUnsub = onSnapshot(collection(cloudDb, ORDERS_COL), (snap) => {
+      const first = !ordersLoaded;
+      ordersLoaded = true; ordersError = '';
+      orders = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+      if (!first){
+        snap.docChanges().forEach(ch => {
+          if (ch.type === 'added' && ch.doc.data().status === 'nuevo') showToast('🛍 Nuevo pedido de ' + (ch.doc.data().name || 'una clienta'));
+        });
+      }
+      setOrdersBadge(); renderOrders();
+    }, (e) => {
+      console.error('No se pudieron leer los pedidos', e);
+      ordersError = (e && (e.code || e.message)) || 'error';
+      ordersUnsub = null;
+      renderOrders();
+    });
+  }
+  function orderItemsText(o){
+    return (o.items || []).map(i => `${i.name} x${i.qty}`).join(', ');
+  }
+  function renderOrders(){
+    const list = $('ordersList');
+    if (!list) return;
+    if (!SYNC_ENABLED){ list.innerHTML = '<div class="empty"><b>Falta la sincronización</b>La tienda online necesita Firebase activado.</div>'; return; }
+    if (ordersError){
+      list.innerHTML = '<div class="empty"><b>No se pudieron leer los pedidos</b>Revisa que las reglas de Firestore incluyan "pedidos" (código: ' + esc(ordersError) + ').</div>';
+      return;
+    }
+    if (!ordersLoaded){ list.innerHTML = '<div class="empty">Cargando pedidos…</div>'; return; }
+    const shown = orders.filter(o => o.status === 'nuevo' || o.status === 'procesado');
+    if (!shown.length){
+      list.innerHTML = '<div class="empty"><b>Todavía no hay pedidos</b>Cuando una clienta compre desde la tienda online, aparecerá aquí.</div>';
+      return;
+    }
+    list.innerHTML = shown.map(o => {
+      const done = o.status === 'procesado';
+      const when = formatDateTime(o.createdAt);
+      const msg = `Hola ${o.name}, te escribo de Blossom Shop. Recibimos tu pedido por ${fmtMoney(o.total)}. ¡Gracias por tu compra!`;
+      return `
+        <div class="rem-item" style="${done ? 'opacity:.6;' : ''}">
+          <div class="rem-top">
+            <div>
+              <div class="rem-name">${esc(o.name)} ${done ? '· ✓ Procesado' : ''}</div>
+              <div class="rem-service">${esc(orderItemsText(o))}</div>
+              <div class="rem-service">📅 ${when} · ${esc(o.method || '')}${o.ref ? ' · Ref. ' + esc(o.ref) : ''}</div>
+              ${o.note ? `<div class="rem-service">📝 ${esc(o.note)}</div>` : ''}
+            </div>
+            <div class="rem-amount">${fmtMoney(o.total)}</div>
+          </div>
+          ${o.proof ? `<img src="${o.proof}" alt="Comprobante" onclick="BlossomShopApp.viewProof('${encodeURIComponent(o.id)}')" style="width:64px; height:64px; object-fit:cover; border-radius:10px; border:1px solid var(--line); margin-top:8px; cursor:zoom-in;">` : ''}
+          <div class="rem-actions">
+            <a class="btn-mini wa" href="${waLink(o.phone, msg)}" target="_blank" rel="noopener">WhatsApp</a>
+            ${done ? '' : `<button class="btn-mini" onclick="BlossomShopApp.orderToSale('${encodeURIComponent(o.id)}')">Convertir en venta</button>`}
+            <button class="btn-mini" onclick="BlossomShopApp.discardOrder('${encodeURIComponent(o.id)}')">${done ? 'Quitar' : 'Descartar'}</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+  function viewProof(encId){
+    const o = orders.find(x => x.id === decodeURIComponent(encId));
+    if (!o || !o.proof) return;
+    const w = document.createElement('div');
+    w.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.88);display:flex;align-items:center;justify-content:center;padding:10px;';
+    w.innerHTML = '<img src="' + o.proof + '" style="max-width:100%;max-height:94vh;border-radius:10px;object-fit:contain;">';
+    w.addEventListener('click', () => w.remove());
+    document.body.appendChild(w);
+  }
+  async function orderToSale(encId){
+    const o = orders.find(x => x.id === decodeURIComponent(encId));
+    if (!o || o.status !== 'nuevo') return;
+    if (!confirm(`¿Convertir el pedido de ${o.name} (${fmtMoney(o.total)}) en venta pagada?\n\nHazlo cuando ya verificaste el comprobante. Se descontará del inventario.`)) return;
+    const digits = String(o.phone || '').replace(/\D/g, '');
+    let client = clients.find(c => { const d = String(c.phone || '').replace(/\D/g, ''); return d && digits && d.slice(-9) === digits.slice(-9); });
+    if (!client){
+      client = { id: 'c_' + Date.now(), name: o.name, phone: o.phone || '', createdAt: new Date().toISOString() };
+      clients.push(client);
+      await saveClients();
+    }
+    const items = (o.items || []).map(i => {
+      const prod = products.find(p => p.id === i.refId);
+      return prod
+        ? { name: prod.name, price: Number(i.price) || prod.price, qty: i.qty || 1, type: 'product', refId: prod.id }
+        : { name: i.name, price: Number(i.price) || 0, qty: i.qty || 1, type: 'custom', refId: null };
+    }).filter(i => i.price > 0);
+    const total = items.reduce((s, i) => s + i.price * i.qty, 0);
+    const now = new Date().toISOString();
+    payments.push({
+      id: 'p_' + Date.now(), clientId: client.id, items, total, advance: total, remaining: 0,
+      abonos: total > 0 ? [{ date: now, amount: total }] : [],
+      serviceDate: now.slice(0, 16), reminderDate: '',
+    });
+    await savePayments();
+    await applyStockChanges(items, -1);
+    try{ await updateDoc(doc(cloudDb, ORDERS_COL, o.id), { status: 'procesado', processedAt: now }); }
+    catch(e){ console.error(e); showToast('Venta creada, pero no se pudo marcar el pedido como procesado'); }
+    render();
+    showToast('Pedido convertido en venta');
+  }
+  async function discardOrder(encId){
+    const o = orders.find(x => x.id === decodeURIComponent(encId));
+    if (!o) return;
+    if (!confirm(o.status === 'procesado' ? '¿Quitar este pedido de la lista?' : '¿Descartar este pedido? No se creará ninguna venta.')) return;
+    try{ await deleteDoc(doc(cloudDb, ORDERS_COL, o.id)); }
+    catch(e){ console.error(e); showToast('No se pudo eliminar el pedido'); }
+  }
+  function esc(t){ return String(t == null ? '' : t).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  function initStoreLinkBox(){
+    const url = storeUrl();
+    $('storeLinkUrl').textContent = url;
+    $('storeLinkCopy').addEventListener('click', async () => {
+      try{ await navigator.clipboard.writeText(url); showToast('Link copiado'); }
+      catch(e){ prompt('Copia el link de tu tienda:', url); }
+    });
+    $('storeLinkShare').addEventListener('click', () => {
+      window.open('https://wa.me/?text=' + encodeURIComponent('Mira mi tienda online Blossom Shop 🛍✨ ' + url), '_blank');
+    });
+    $('storeLinkOpen').addEventListener('click', () => window.open(url, '_blank'));
+    renderCatalogStatus();
+  }
+
   async function initCloudSync(){
     if (!SYNC_ENABLED){ updateSyncBadge('off'); return; }
     updateSyncBadge('connecting');
@@ -1155,6 +1401,7 @@ function getFirebaseAuthInstance(){
       }
       cloudDb = getFirestore(app);
       await loadSyncState();
+      try{ const cs = await window.storage.get('catalogState', false); if (cs && cs.value) catalogState = JSON.parse(cs.value) || {}; }catch(e){}
       const localEmpty = !clients.length && !payments.length && !services.length && !products.length;
       if (localEmpty && !syncStateExisted){
         // Celular nuevo o datos borrados: se intenta recuperar lo respaldado en la nube.
@@ -1165,7 +1412,9 @@ function getFirebaseAuthInstance(){
         }
       }
       scheduleSync(500);
-      window.addEventListener('online', () => scheduleSync(500));
+      scheduleCatalogPublish(1200);
+      startOrdersListener();
+      window.addEventListener('online', () => { scheduleSync(500); scheduleCatalogPublish(500); startOrdersListener(); });
       setInterval(() => scheduleSync(0), 120000);
     }catch(e){
       console.error('No se pudo iniciar el respaldo en la nube', e);
@@ -2391,6 +2640,7 @@ function getFirebaseAuthInstance(){
     renderProducts();
     renderLedger();
     renderReminders();
+    renderCatalogStatus();
   }
 
 
@@ -2810,7 +3060,7 @@ function getFirebaseAuthInstance(){
   $('downloadExcelBtn').addEventListener('click', downloadExcelLedger);
   $('restoreFileInput').addEventListener('change', (e) => restoreBackup(e.target.files[0]));
 
-  window.BlossomShopApp = { editClient, addAbono, markPaid, deletePayment, editService, deleteService, editProduct, deleteProduct, changeProductImage, showInvoice };
+  window.BlossomShopApp = { viewProof, orderToSale, discardOrder, editClient, addAbono, markPaid, deletePayment, editService, deleteService, editProduct, deleteProduct, changeProductImage, showInvoice };
 
   // Instalación como app (PWA)
   let deferredInstallPrompt = null;
@@ -2872,6 +3122,7 @@ function getFirebaseAuthInstance(){
   }
 
   async function startApp(){
+    initStoreLinkBox();
     ensureAtLeastOneRow();
     // Importante: hay que esperar a que termine de cargar lo guardado en este
     // celular ANTES de conectar con la nube. Si las dos corrieran al mismo
