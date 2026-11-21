@@ -649,6 +649,9 @@
         <input id="newProductCategory" list="categoryOptions" placeholder="Categoría (ej: Perfumes, Ropa, Accesorios)" autocomplete="off">
         <datalist id="categoryOptions"></datalist>
       </div>
+      <div class="field" style="margin-top:8px; margin-bottom:0;">
+        <textarea id="newProductDescription" rows="2" maxlength="600" placeholder="Descripción para la tienda (opcional): qué es, medidas, cuidados, aroma..." style="width:100%; padding:11px 12px; border:1.5px solid var(--line); border-radius:12px; font:inherit; font-size:13.5px; background:#fff; resize:vertical;"></textarea>
+      </div>
       <div class="field" style="margin-top:8px; margin-bottom:0; display:flex; align-items:center; gap:10px;">
         <img id="newProductPreview" style="display:none; width:48px; height:48px; object-fit:cover; border-radius:8px; border:1px solid var(--line);">
         <label for="newProductImage" style="flex:1; font-size:12.5px; color:var(--muted); border:1px dashed var(--line); border-radius:10px; padding:8px 10px; text-align:center; cursor:pointer;">📷 Agregar foto del producto (catálogo)</label>
@@ -934,6 +937,38 @@ function getFirebaseAuthInstance(){
     });
   }
 
+  // Fotos de la tienda online: la app guarda una miniatura chica (rápida y liviana) y, aparte,
+  // una versión de tarjeta y una grande que solo se publican en la tienda. Así las fotos se ven
+  // nítidas sin volver pesada la app ni el respaldo.
+  const STORE_CARD_PX = 440, STORE_CARD_Q = 0.82, STORE_HD_PX = 1100, STORE_HD_Q = 0.86;
+  let storePhotos = {};   // id de producto -> { card, hd }
+  async function loadStorePhotos(){
+    try{ const r = await window.storage.get('storePhotos', false); if (r && r.value) storePhotos = JSON.parse(r.value) || {}; }catch(e){ storePhotos = {}; }
+  }
+  async function saveStorePhotos(){
+    try{ await window.storage.set('storePhotos', JSON.stringify(storePhotos), false); return true; }
+    catch(e){ console.error('No se pudieron guardar las fotos de la tienda', e); showToast('La foto se guardó, pero sin la versión HD para la tienda (poco espacio en el celular)'); return false; }
+  }
+  function readFileAsDataUrl(file){
+    return new Promise((resolve) => {
+      if (!file){ resolve(null); return; }
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => resolve(null);
+      r.readAsDataURL(file);
+    });
+  }
+  async function processProductPhoto(file){
+    const src = await readFileAsDataUrl(file);
+    if (!src) return null;
+    const [thumb, card, hd] = await Promise.all([
+      shrinkDataUrl(src, PHOTO_MAX_PX, PHOTO_QUALITY),
+      shrinkDataUrl(src, STORE_CARD_PX, STORE_CARD_Q),
+      shrinkDataUrl(src, STORE_HD_PX, STORE_HD_Q),
+    ]);
+    return thumb ? { thumb, card, hd } : null;
+  }
+
   function resizeImageFile(file, maxSize, quality){
     return new Promise((resolve) => {
       if (!file){ resolve(null); return; }
@@ -1176,7 +1211,7 @@ function getFirebaseAuthInstance(){
   //   (colección "catalogo") y la tienda la lee en tiempo real.
   // - Los pedidos que hacen las clientas llegan a la colección "pedidos".
   // ============================================================
-  const CATALOG_COL = 'catalogo', ORDERS_COL = 'pedidos';
+  const CATALOG_COL = 'catalogo', CATALOG_HD_COL = 'catalogo_hd', ORDERS_COL = 'pedidos';
   let catalogState = {};          // id -> hash de lo ya publicado
   let catalogRemoteChecked = false;
   let catalogTimer = null, catalogRunning = false, catalogAgain = false;
@@ -1193,8 +1228,11 @@ function getFirebaseAuthInstance(){
     return !!(u && u.email && AUTHORIZED_EMAILS.includes(u.email.toLowerCase()));
   }
   function publicProduct(p){
+    const sp = storePhotos[p.id] || {};
     return { name: p.name || '', price: Number(p.price) || 0, stock: Math.max(parseInt(p.stock, 10) || 0, 0),
-             size: p.size || '', color: p.color || '', category: (p.category || '').trim(), image: p.image || '' };
+             size: p.size || '', color: p.color || '', category: (p.category || '').trim(),
+             description: String(p.description || '').trim().slice(0, 600),
+             image: sp.card || p.image || '' };
   }
   function renderCatalogStatus(){
     const el = $('catalogPubStatus');
@@ -1215,45 +1253,63 @@ function getFirebaseAuthInstance(){
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     catalogRunning = true; catalogAgain = false;
     try{
+      // desired: clave -> { col, id, json, hash }. Las fotos grandes van aparte (catalogo_hd) y se leen solo al abrir el producto.
       const desired = {};
       products.forEach(p => {
         const pub = publicProduct(p);
         if (!p.id || !pub.name || pub.price <= 0 || pub.stock <= 0) return;
         const json = JSON.stringify(pub);
         if (json.length > 900000) return;
-        desired[encodeURIComponent(p.id)] = { json, hash: hashStr(json) };
+        const id = encodeURIComponent(p.id);
+        desired[id] = { col: CATALOG_COL, id, json, hash: hashStr(json) };
+        const hd = storePhotos[p.id] && storePhotos[p.id].hd;
+        if (hd && hd.length < 900000){
+          const hj = JSON.stringify({ image: hd });
+          desired['hd/' + id] = { col: CATALOG_HD_COL, id, json: hj, hash: hashStr(hj) };
+        }
       });
       let remote = null;
       if (!catalogRemoteChecked){
         remote = new Set();
         const snap = await getDocs(collection(cloudDb, CATALOG_COL));
         snap.forEach(d => remote.add(d.id));
+        const snapHd = await getDocs(collection(cloudDb, CATALOG_HD_COL));
+        snapHd.forEach(d => remote.add('hd/' + d.id));
       }
       const sets = [], dels = [];
-      Object.keys(desired).forEach(id => {
-        if (catalogState[id] !== desired[id].hash || (remote && !remote.has(id))) sets.push(id);
+      Object.keys(desired).forEach(k => {
+        if (catalogState[k] !== desired[k].hash || (remote && !remote.has(k))) sets.push(k);
       });
       const known = new Set([...Object.keys(catalogState), ...(remote ? [...remote] : [])]);
-      known.forEach(id => { if (!desired[id]) dels.push(id); });
-      let batch = writeBatch(cloudDb), ops = 0;
+      known.forEach(k => {
+        if (desired[k]) return;
+        // la foto grande de un producto que sigue publicado no se borra aunque este celular no la tenga
+        if (k.startsWith('hd/') && desired[k.slice(3)]) return;
+        dels.push(k);
+      });
+      let batch = writeBatch(cloudDb), ops = 0, bytes = 0;
       const commit = async () => {
         if (!ops) return;
-        await batch.commit(); batch = writeBatch(cloudDb); ops = 0;
+        await batch.commit(); batch = writeBatch(cloudDb); ops = 0; bytes = 0;
       };
-      for (const id of sets){
-        if (ops >= 100) await commit();
-        batch.set(doc(cloudDb, CATALOG_COL, id), JSON.parse(desired[id].json)); ops++;
+      for (const k of sets){
+        const d = desired[k];
+        if (ops >= 100 || bytes + d.json.length > 8000000) await commit();
+        batch.set(doc(cloudDb, d.col, d.id), JSON.parse(d.json)); ops++; bytes += d.json.length;
       }
-      for (const id of dels){
+      for (const k of dels){
         if (ops >= 100) await commit();
-        batch.delete(doc(cloudDb, CATALOG_COL, id)); ops++;
+        const isHd = k.startsWith('hd/');
+        batch.delete(doc(cloudDb, isHd ? CATALOG_HD_COL : CATALOG_COL, isHd ? k.slice(3) : k)); ops++;
       }
       await commit();
       const next = {};
-      Object.keys(desired).forEach(id => { next[id] = desired[id].hash; });
+      Object.keys(desired).forEach(k => { next[k] = desired[k].hash; });
+      // se conserva lo ya publicado de las fotos grandes que este celular no tiene
+      Object.keys(catalogState).forEach(k => { if (k.startsWith('hd/') && !next[k] && desired[k.slice(3)]) next[k] = catalogState[k]; });
       catalogState = next; catalogRemoteChecked = true;
       try{ await window.storage.set('catalogState', JSON.stringify(catalogState), false); }catch(e){}
-      catalogPublishedCount = Object.keys(desired).length; catalogError = '';
+      catalogPublishedCount = Object.keys(desired).filter(k => !k.startsWith('hd/')).length; catalogError = '';
     }catch(e){
       console.error('No se pudo publicar el catálogo', e);
       catalogError = (e && (e.code || e.message)) || 'error';
@@ -2412,7 +2468,7 @@ function getFirebaseAuthInstance(){
           <img src="${p.image || ''}" loading="lazy" decoding="async" onerror="this.style.display='none'" style="${p.image ? '' : 'display:none;'} width:44px; height:44px; object-fit:cover; border-radius:8px; margin-right:8px; flex-shrink:0;">
           <div style="flex:1;">
             <div class="service-name">${p.name}${p.size ? ' · Talla ' + p.size : ''}${p.color ? ' · ' + p.color : ''}</div>
-            ${p.category ? `<div style="font-size:11px; color:var(--muted);">🏷 ${esc(p.category)}</div>` : ''}
+            ${p.category ? `<div style="font-size:11px; color:var(--muted);">🏷 ${esc(p.category)}${p.description ? ' · 📝 con descripción' : ''}</div>` : (p.description ? '<div style="font-size:11px; color:var(--muted);">📝 con descripción</div>' : '')}
             <div class="service-price">${fmtMoney(p.price)} ${stockBadge(p.stock)}</div>
           </div>
           <div class="service-actions">
@@ -2813,14 +2869,18 @@ function getFirebaseAuthInstance(){
     const category = $('newProductCategory').value.trim();
     if (!name){ showToast('Escribe el nombre del producto'); return; }
     const file = $('newProductImage').files[0];
-    const image = await resizeImageFile(file, PHOTO_MAX_PX, PHOTO_QUALITY);
-    products.push({ id: 'pr_' + Date.now(), name, price, stock, size, color, category, image });
+    const photo = await processProductPhoto(file);
+    const description = $('newProductDescription').value.trim();
+    const id = 'pr_' + Date.now();
+    products.push({ id, name, price, stock, size, color, category, description, image: photo ? photo.thumb : null });
+    if (photo){ storePhotos[id] = { card: photo.card, hd: photo.hd }; await saveStorePhotos(); }
     await saveProducts();
     $('newProductName').value = '';
     $('newProductPrice').value = '';
     $('newProductStock').value = '';
     $('newProductSize').value = '';
     $('newProductColor').value = '';
+    $('newProductDescription').value = '';
     // la categoría se deja puesta: suele agregarse varios productos seguidos de la misma
     $('newProductImage').value = '';
     $('newProductPreview').style.display = 'none';
@@ -2844,12 +2904,15 @@ function getFirebaseAuthInstance(){
     const cats = categoryNames();
     const newCategory = prompt('Categoría de la tienda' + (cats.length ? ' (existentes: ' + cats.join(', ') + ')' : '') + ':', p.category || '');
     if (newCategory === null) return;
+    const newDesc = prompt('Descripción para la tienda (qué es, medidas, cuidados...). Déjala vacía para quitarla:', p.description || '');
+    if (newDesc === null) return;
     p.name = newName.trim() || p.name;
     p.price = parseFloat(newPriceStr) || p.price;
     p.stock = Math.max(parseInt(newStockStr, 10) || 0, 0);
     p.size = newSize.trim();
     p.color = newColor.trim();
     p.category = newCategory.trim();
+    p.description = newDesc.trim().slice(0, 600);
     await saveProducts();
     render();
     showToast('Producto actualizado');
@@ -2860,9 +2923,11 @@ function getFirebaseAuthInstance(){
     if (!p) return;
     const file = input.files[0];
     if (!file) return;
-    const image = await resizeImageFile(file, PHOTO_MAX_PX, PHOTO_QUALITY);
-    if (image){
-      p.image = image;
+    const photo = await processProductPhoto(file);
+    if (photo){
+      p.image = photo.thumb;
+      storePhotos[p.id] = { card: photo.card, hd: photo.hd };
+      await saveStorePhotos();
       await saveProducts();
       render();
       showToast('Foto del producto actualizada');
@@ -2872,6 +2937,7 @@ function getFirebaseAuthInstance(){
   async function deleteProduct(productId){
     if (!confirm('¿Eliminar este producto del inventario?')) return;
     products = products.filter(p => p.id !== productId);
+    if (storePhotos[productId]){ delete storePhotos[productId]; await saveStorePhotos(); }
     await saveProducts();
     render();
     showToast('Producto eliminado');
@@ -3139,6 +3205,7 @@ function getFirebaseAuthInstance(){
 
   async function startApp(){
     initStoreLinkBox();
+    await loadStorePhotos();
     ensureAtLeastOneRow();
     // Importante: hay que esperar a que termine de cargar lo guardado en este
     // celular ANTES de conectar con la nube. Si las dos corrieran al mismo
